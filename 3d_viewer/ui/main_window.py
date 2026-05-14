@@ -8,6 +8,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QHBoxLayout, QLabel, QListWidget, QMainWindow,
     QMessageBox, QPushButton, QSlider, QSplitter, QStatusBar, QVBoxLayout, QWidget,
+    QComboBox,
 )
 
 from core.dataset import CameraPose, Dataset, find_default_dataset, load_dataset
@@ -46,6 +47,16 @@ class MainWindow(QMainWindow):
         self.size_slider.setValue(2)
         self.size_slider.valueChanged.connect(lambda v: self.scene.set_point_size(float(v)))
 
+        self.yaw_offset = QComboBox()
+        for label, value in [
+            ("0°", 0.0),
+            ("+90°", 90.0),
+            ("-90°", -90.0),
+            ("180°", 180.0),
+        ]:
+            self.yaw_offset.addItem(label, value)
+        self.yaw_offset.currentIndexChanged.connect(self._on_yaw_offset)
+
         self.lbl_pose = QLabel("—")
         self.lbl_pose.setWordWrap(True)
         self.lbl_hover = QLabel("hover: —")
@@ -76,6 +87,9 @@ class MainWindow(QMainWindow):
 
         v.addWidget(QLabel("点大小"))
         v.addWidget(self.size_slider)
+
+        v.addWidget(QLabel("全景水平校准"))
+        v.addWidget(self.yaw_offset)
 
         v.addWidget(QLabel("当前位姿")); v.addWidget(self.lbl_pose)
         v.addWidget(QLabel("吸附信息")); v.addWidget(self.lbl_hover)
@@ -156,6 +170,9 @@ class MainWindow(QMainWindow):
     def _set_pano_visible(self, on: bool):
         self.scene.set_show_pano(on)
         self.btn_toggle_pano.setText("隐藏全景影像" if on else "显示全景影像")
+
+    def _on_yaw_offset(self):
+        self.scene.set_pano_yaw_offset(float(self.yaw_offset.currentData()))
 
     # 全屏快捷键转给 scene
     def keyPressEvent(self, e):

@@ -62,6 +62,9 @@ class SceneView(QWidget):
     def set_point_size(self, sz: float):
         self.gl_window.set_point_size(sz)
 
+    def set_pano_yaw_offset(self, degrees: float):
+        self.gl_window.set_pano_yaw_offset(degrees)
+
     def reset_view(self):
         self.gl_window.reset_view()
 
@@ -136,6 +139,11 @@ class _SceneGLWindow(QOpenGLWindow):
     def set_point_size(self, sz: float):
         if self._pc is not None:
             self._pc.point_size = float(sz)
+            self.update()
+
+    def set_pano_yaw_offset(self, degrees: float):
+        if self._pano is not None:
+            self._pano.set_yaw_offset(degrees)
             self.update()
 
     def reset_view(self):

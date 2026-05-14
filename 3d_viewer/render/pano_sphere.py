@@ -33,6 +33,7 @@ _FRAG_SRC = """
 #version 330
 uniform sampler2D pano;
 uniform mat3 R_pano;        // world -> pano_local
+uniform float yaw_offset_rad;
 uniform float img_w;
 uniform float img_h;
 in vec3 v_dir;
@@ -53,7 +54,7 @@ void main() {
     else if (left && !front)  u_pix = img_h * (-tm_h) / PI;
     else if (!left && front)  u_pix = img_h - img_h * tm_h / PI;
     else                      u_pix = img_w - img_h * tm_h / PI;
-    u_pix = mod(u_pix, img_w);
+    u_pix = mod(u_pix + img_w * yaw_offset_rad / (2.0 * PI), img_w);
 
     float horiz = sqrt(p.x * p.x + p.y * p.y);
     float tm_v;
@@ -105,6 +106,7 @@ class PanoSphere:
         self.img_w = 1.0
         self.img_h = 1.0
         self.R_pano = np.eye(3, dtype=np.float32)
+        self.yaw_offset_deg = 0.0
         self._loaded_path: Path | None = None
 
     def load_image(self, path: Path):
@@ -133,6 +135,9 @@ class PanoSphere:
     def set_pose(self, roll: float, pitch: float, yaw: float):
         self.R_pano = rotation_from_angle(roll, pitch, yaw).astype(np.float32)
 
+    def set_yaw_offset(self, degrees: float):
+        self.yaw_offset_deg = float(degrees)
+
     def render(self, mvp: np.ndarray, cam_pos: np.ndarray):
         if self.tex is None:
             return
@@ -140,6 +145,7 @@ class PanoSphere:
         self.prog["mvp"].write(mvp.T.tobytes())
         self.prog["cam_pos"].value = tuple(float(v) for v in cam_pos)
         self.prog["R_pano"].write(self.R_pano.T.tobytes())
+        self.prog["yaw_offset_rad"].value = float(np.deg2rad(self.yaw_offset_deg))
         self.prog["img_w"].value = self.img_w
         self.prog["img_h"].value = self.img_h
         self.prog["pano"].value = 0
