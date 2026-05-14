@@ -66,3 +66,9 @@ cd /Users/gengchen/Desktop/3dtiqu
 - 数据解析 / LAS 抽样思路沿用 `desktop_viewer/data.py`
 - `rotation_from_angle` 复刻 `算法例子/projectToPanoramic.py`，确保全景贴图和原始算法的坐标系一致
 - 旧的 `desktop_viewer/` 是 OpenGL 2.1 + 全景 overlay 范式（点云投到全景图上当像素），与本目录不重叠
+
+## 坐标校准说明
+
+当前数据的点云和全景影像在水平平面存在稳定 90° 基准轴差异，UI 默认使用 `-90°` 全景水平校准。
+
+详见 [`PANORAMA_YAW_ALIGNMENT.md`](PANORAMA_YAW_ALIGNMENT.md)。

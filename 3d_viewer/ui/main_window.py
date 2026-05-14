@@ -55,6 +55,7 @@ class MainWindow(QMainWindow):
             ("180°", 180.0),
         ]:
             self.yaw_offset.addItem(label, value)
+        self.yaw_offset.setCurrentIndex(2)
         self.yaw_offset.currentIndexChanged.connect(self._on_yaw_offset)
 
         self.lbl_pose = QLabel("—")
@@ -117,6 +118,7 @@ class MainWindow(QMainWindow):
 
         d = self.dataset
         self.scene.set_world_points(d.points, d.colors)
+        self.scene.set_pano_yaw_offset(float(self.yaw_offset.currentData()))
         self.list.blockSignals(True)
         self.list.clear()
         for p in d.poses:
