@@ -1,0 +1,26 @@
+# Python / local runtime
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# macOS / editor
+.DS_Store
+.vscode/
+
+# Large captured datasets and generated outputs
+20260129135824/
+out/
+2d/out*/
+
+# Point cloud / panorama raw data that should stay local
+*.las
+*.laz
+*.pcd
+*.pcap
+*.insv
+*.lrv
+
+# Generated logs / temporary files
+*.log
+*.tmp

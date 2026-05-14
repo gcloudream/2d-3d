@@ -1,0 +1,6 @@
+laspy>=2.7
+numpy>=2.0
+opencv-python-headless>=4.10
+PyOpenGL>=3.1
+pyqtgraph>=0.13
+PySide6>=6.8
