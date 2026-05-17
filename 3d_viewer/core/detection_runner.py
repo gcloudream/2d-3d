@@ -8,14 +8,45 @@ from pathlib import Path
 from core.detection_cache import detection_output_dir, detection_output_path
 
 
+DETECTION_MODE_LABELS = {
+    "precise": "精准模式",
+    "recall": "召回模式",
+}
+
+_PRECISE_CLASSES = (
+    "door|a door|a glass door|an office door,"
+    "window|a window|a glass window|an interior window"
+)
+_PRECISE_EXCLUDE = "monitor|computer monitor|screen|whiteboard|cabinet|shelf|poster"
+
+_RECALL_CLASSES = (
+    "door|a door|a glass door|an office door|a doorway,"
+    "window|a window|a glass window|an interior window|a glass partition|"
+    "a glass panel|a glass cabinet door"
+)
+
+
 def build_detection_command(
     workspace: Path,
     image_path: Path,
-    score_thr: float = 0.12,
-    pano_split: int = 4,
-    pano_out_size: int = 768,
+    mode: str = "precise",
 ) -> list[str]:
-    return [
+    if mode == "precise":
+        score_thr = 0.10
+        pano_split = 6
+        pano_out_size = 1024
+        classes = _PRECISE_CLASSES
+        exclude = _PRECISE_EXCLUDE
+    elif mode == "recall":
+        score_thr = 0.06
+        pano_split = 6
+        pano_out_size = 1024
+        classes = _RECALL_CLASSES
+        exclude = ""
+    else:
+        raise ValueError(f"unknown detection mode: {mode}")
+
+    cmd = [
         sys.executable,
         str(workspace / "2d" / "detect_owlvit.py"),
         "--input", str(image_path),
@@ -25,12 +56,18 @@ def build_detection_command(
         "--pano-fov", "90",
         "--score-thr", str(score_thr),
         "--min-area", "0.0015",
+        "--classes", classes,
+    ]
+    if exclude:
+        cmd.extend(["--exclude", exclude])
+    return [
+        *cmd,
     ]
 
 
-def run_detection_for_image(workspace: Path, image_path: Path) -> Path:
+def run_detection_for_image(workspace: Path, image_path: Path, mode: str = "precise") -> Path:
     detection_output_dir(workspace).mkdir(parents=True, exist_ok=True)
-    cmd = build_detection_command(workspace, image_path)
+    cmd = build_detection_command(workspace, image_path, mode=mode)
     try:
         subprocess.run(
             cmd,
@@ -42,7 +79,10 @@ def run_detection_for_image(workspace: Path, image_path: Path) -> Path:
     except subprocess.CalledProcessError as e:
         tail = "\n".join((e.stdout or e.stderr or str(e)).splitlines()[-12:])
         raise RuntimeError(tail) from e
-    out = detection_output_path(workspace, image_path.name)
-    if not out.exists():
-        raise RuntimeError(f"detection finished but JSON was not created: {out}")
-    return out
+    produced = detection_output_path(workspace, image_path.name, mode="precise")
+    if not produced.exists():
+        raise RuntimeError(f"detection finished but JSON was not created: {produced}")
+    final = detection_output_path(workspace, image_path.name, mode=mode)
+    if final != produced:
+        produced.replace(final)
+    return final

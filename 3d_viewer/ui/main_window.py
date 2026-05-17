@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
 
 from core.dataset import CameraPose, Dataset, find_default_dataset, load_dataset
 from core.detection_cache import find_detection_json
-from core.detection_runner import run_detection_for_image
+from core.detection_runner import DETECTION_MODE_LABELS, run_detection_for_image
 from core.door_window import select_detection_region
 from core.projection import project_points_to_panorama, rotation_from_angle
 from render.scene_view import SceneView
@@ -24,14 +24,15 @@ class DetectionWorker(QObject):
     finished = Signal(str)
     failed = Signal(str)
 
-    def __init__(self, workspace: Path, image_path: Path):
+    def __init__(self, workspace: Path, image_path: Path, mode: str):
         super().__init__()
         self.workspace = workspace
         self.image_path = image_path
+        self.mode = mode
 
     def run(self):
         try:
-            out = run_detection_for_image(self.workspace, self.image_path)
+            out = run_detection_for_image(self.workspace, self.image_path, mode=self.mode)
         except Exception as e:
             self.failed.emit(str(e))
             return
@@ -79,6 +80,11 @@ class MainWindow(QMainWindow):
 
         self.btn_detect_current = QPushButton("检测当前帧")
         self.btn_detect_current.clicked.connect(self._detect_current_frame)
+
+        self.det_mode = QComboBox()
+        self.det_mode.addItem("精准模式", "precise")
+        self.det_mode.addItem("召回模式", "recall")
+        self.det_mode.currentIndexChanged.connect(self._on_detection_mode_changed)
 
         self.size_slider = QSlider(Qt.Horizontal)
         self.size_slider.setMinimum(1)
@@ -129,6 +135,8 @@ class MainWindow(QMainWindow):
         v.addWidget(self.cb_pc)
         v.addWidget(self.cb_pick_dw)
         v.addWidget(self.cb_show_bboxes)
+        v.addWidget(QLabel("检测模式"))
+        v.addWidget(self.det_mode)
         v.addWidget(self.btn_detect_current)
 
         v.addWidget(QLabel("点大小"))
@@ -233,9 +241,10 @@ class MainWindow(QMainWindow):
         self.current_detections = []
         self.current_image_size = None
         self.scene.set_detections([], 0, 0)
-        path = find_detection_json(self.workspace, pose.image_name)
+        mode = self._detection_mode()
+        path = find_detection_json(self.workspace, pose.image_name, mode=mode)
         if path is None:
-            self.lbl_detection.setText("检测: 未找到当前 keyframe JSON")
+            self.lbl_detection.setText(f"检测: 未找到当前 keyframe JSON\n{DETECTION_MODE_LABELS[mode]}")
             return
         try:
             payload = json.loads(path.read_text(encoding="utf-8"))
@@ -250,8 +259,19 @@ class MainWindow(QMainWindow):
             self.current_image_size[1],
         )
         self.lbl_detection.setText(
-            f"检测: {len(self.current_detections)} boxes\n{path.relative_to(self.workspace)}"
+            f"检测: {len(self.current_detections)} boxes · {DETECTION_MODE_LABELS[mode]}\n"
+            f"{path.relative_to(self.workspace)}"
         )
+
+    def _detection_mode(self) -> str:
+        return str(self.det_mode.currentData())
+
+    def _on_detection_mode_changed(self):
+        if not self.dataset or self.current_idx < 0:
+            return
+        self.scene.set_highlight_mask(None)
+        self.scene.set_selected_detection(-1)
+        self._load_detections(self.dataset.poses[self.current_idx])
 
     def _detect_current_frame(self):
         if not self.dataset or self.current_idx < 0:
@@ -260,18 +280,19 @@ class MainWindow(QMainWindow):
             self.lbl_detection.setText("检测: 当前已有检测任务运行中")
             return
         pose = self.dataset.poses[self.current_idx]
-        cached = find_detection_json(self.workspace, pose.image_name)
+        mode = self._detection_mode()
+        cached = find_detection_json(self.workspace, pose.image_name, mode=mode)
         if cached is not None:
             self._load_detections(pose)
             self.statusBar().showMessage(f"已加载缓存: {cached.name}")
             return
         image_path = self.dataset.image_dir / pose.image_name
         self.btn_detect_current.setEnabled(False)
-        self.lbl_detection.setText(f"检测中...\n{pose.image_name}")
-        self.statusBar().showMessage("正在检测当前帧，完成后会自动加载结果")
+        self.lbl_detection.setText(f"检测中... {DETECTION_MODE_LABELS[mode]}\n{pose.image_name}")
+        self.statusBar().showMessage(f"正在检测当前帧（{DETECTION_MODE_LABELS[mode]}），完成后会自动加载结果")
 
         thread = QThread(self)
-        worker = DetectionWorker(self.workspace, image_path)
+        worker = DetectionWorker(self.workspace, image_path, mode)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.finished.connect(self._on_detection_finished)

@@ -40,6 +40,14 @@ class DetectionCacheTest(unittest.TestCase):
             workspace / "out" / "door_window_detections" / "608.675997_IMG.json",
         )
 
+    def test_recall_mode_uses_separate_cache_file(self):
+        workspace = Path("/tmp/work")
+        out = detection_output_path(workspace, "608.675997_IMG.jpg", mode="recall")
+        self.assertEqual(
+            out,
+            workspace / "out" / "door_window_detections" / "608.675997_IMG_recall.json",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
