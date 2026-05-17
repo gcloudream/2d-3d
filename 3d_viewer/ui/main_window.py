@@ -1,10 +1,11 @@
 """主窗口：左侧 OpenGL 视图，右侧 keyframe 列表 + 控制面板 + 信息。"""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QObject, QThread, Qt, Signal
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QHBoxLayout, QLabel, QListWidget, QMainWindow,
     QMessageBox, QPushButton, QSlider, QSplitter, QStatusBar, QVBoxLayout, QWidget,
@@ -12,7 +13,29 @@ from PySide6.QtWidgets import (
 )
 
 from core.dataset import CameraPose, Dataset, find_default_dataset, load_dataset
+from core.detection_cache import find_detection_json
+from core.detection_runner import run_detection_for_image
+from core.door_window import select_detection_region
+from core.projection import project_points_to_panorama, rotation_from_angle
 from render.scene_view import SceneView
+
+
+class DetectionWorker(QObject):
+    finished = Signal(str)
+    failed = Signal(str)
+
+    def __init__(self, workspace: Path, image_path: Path):
+        super().__init__()
+        self.workspace = workspace
+        self.image_path = image_path
+
+    def run(self):
+        try:
+            out = run_detection_for_image(self.workspace, self.image_path)
+        except Exception as e:
+            self.failed.emit(str(e))
+            return
+        self.finished.emit(str(out))
 
 
 class MainWindow(QMainWindow):
@@ -23,9 +46,14 @@ class MainWindow(QMainWindow):
         self.workspace = workspace
         self.dataset: Dataset | None = None
         self.current_idx = -1
+        self.current_detections: list[dict] = []
+        self.current_image_size: tuple[int, int] | None = None
+        self._det_thread: QThread | None = None
+        self._det_worker: DetectionWorker | None = None
 
         self.scene = SceneView()
         self.scene.hover_changed.connect(self._on_hover)
+        self.scene.point_clicked.connect(self._on_point_clicked)
 
         self.list = QListWidget()
         self.list.currentRowChanged.connect(self._on_select)
@@ -40,6 +68,17 @@ class MainWindow(QMainWindow):
         self.cb_pc = QCheckBox("显示点云")
         self.cb_pc.setChecked(True)
         self.cb_pc.toggled.connect(self.scene.set_show_pc)
+
+        self.cb_pick_dw = QCheckBox("门窗选择")
+        self.cb_pick_dw.setChecked(False)
+        self.cb_pick_dw.toggled.connect(self._set_door_window_pick_mode)
+
+        self.cb_show_bboxes = QCheckBox("显示检测框")
+        self.cb_show_bboxes.setChecked(True)
+        self.cb_show_bboxes.toggled.connect(self.scene.set_show_bboxes)
+
+        self.btn_detect_current = QPushButton("检测当前帧")
+        self.btn_detect_current.clicked.connect(self._detect_current_frame)
 
         self.size_slider = QSlider(Qt.Horizontal)
         self.size_slider.setMinimum(1)
@@ -63,6 +102,9 @@ class MainWindow(QMainWindow):
         self.lbl_hover = QLabel("hover: —")
         self.lbl_hover.setWordWrap(True)
         self.lbl_hover.setStyleSheet("font-family: ui-monospace, Menlo, monospace;")
+        self.lbl_detection = QLabel("检测: —")
+        self.lbl_detection.setWordWrap(True)
+        self.lbl_detection.setStyleSheet("font-family: ui-monospace, Menlo, monospace;")
 
         self._build_ui()
         self.setStatusBar(QStatusBar())
@@ -85,6 +127,9 @@ class MainWindow(QMainWindow):
         v.addWidget(self.cb_pano)
         v.addWidget(self.btn_toggle_pano)
         v.addWidget(self.cb_pc)
+        v.addWidget(self.cb_pick_dw)
+        v.addWidget(self.cb_show_bboxes)
+        v.addWidget(self.btn_detect_current)
 
         v.addWidget(QLabel("点大小"))
         v.addWidget(self.size_slider)
@@ -94,6 +139,7 @@ class MainWindow(QMainWindow):
 
         v.addWidget(QLabel("当前位姿")); v.addWidget(self.lbl_pose)
         v.addWidget(QLabel("吸附信息")); v.addWidget(self.lbl_hover)
+        v.addWidget(QLabel("门窗命中")); v.addWidget(self.lbl_detection)
 
         v.addStretch(1)
         v.addWidget(QLabel("拖动: 转视角 · 滚轮: 缩放 · ←/→: 切 keyframe"
@@ -149,6 +195,9 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "缺图", str(img))
             return
         self.scene.set_keyframe(pose, img)
+        self.scene.set_highlight_mask(None)
+        self.scene.set_selected_detection(-1)
+        self._load_detections(pose)
         self.lbl_pose.setText(
             f"{pose.image_name}\n"
             f"pos: ({pose.x:.3f}, {pose.y:.3f}, {pose.z:.3f})\n"
@@ -175,6 +224,138 @@ class MainWindow(QMainWindow):
 
     def _on_yaw_offset(self):
         self.scene.set_pano_yaw_offset(float(self.yaw_offset.currentData()))
+
+    def _set_door_window_pick_mode(self, on: bool):
+        self.scene.set_pick_mode(on)
+        self.statusBar().showMessage("门窗选择模式：点击点云点" if on else "导航模式")
+
+    def _load_detections(self, pose: CameraPose):
+        self.current_detections = []
+        self.current_image_size = None
+        self.scene.set_detections([], 0, 0)
+        path = find_detection_json(self.workspace, pose.image_name)
+        if path is None:
+            self.lbl_detection.setText("检测: 未找到当前 keyframe JSON")
+            return
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except Exception as e:
+            self.lbl_detection.setText(f"检测: 读取失败\n{path.name}\n{e}")
+            return
+        self.current_detections = list(payload.get("detections", []))
+        self.current_image_size = (int(payload.get("width", 0)), int(payload.get("height", 0)))
+        self.scene.set_detections(
+            self.current_detections,
+            self.current_image_size[0],
+            self.current_image_size[1],
+        )
+        self.lbl_detection.setText(
+            f"检测: {len(self.current_detections)} boxes\n{path.relative_to(self.workspace)}"
+        )
+
+    def _detect_current_frame(self):
+        if not self.dataset or self.current_idx < 0:
+            return
+        if self._det_thread is not None:
+            self.lbl_detection.setText("检测: 当前已有检测任务运行中")
+            return
+        pose = self.dataset.poses[self.current_idx]
+        cached = find_detection_json(self.workspace, pose.image_name)
+        if cached is not None:
+            self._load_detections(pose)
+            self.statusBar().showMessage(f"已加载缓存: {cached.name}")
+            return
+        image_path = self.dataset.image_dir / pose.image_name
+        self.btn_detect_current.setEnabled(False)
+        self.lbl_detection.setText(f"检测中...\n{pose.image_name}")
+        self.statusBar().showMessage("正在检测当前帧，完成后会自动加载结果")
+
+        thread = QThread(self)
+        worker = DetectionWorker(self.workspace, image_path)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_detection_finished)
+        worker.failed.connect(self._on_detection_failed)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(self._clear_detection_worker)
+        self._det_thread = thread
+        self._det_worker = worker
+        thread.start()
+
+    def _on_detection_finished(self, path_text: str):
+        if not self.dataset or self.current_idx < 0:
+            return
+        pose = self.dataset.poses[self.current_idx]
+        out_path = Path(path_text)
+        if out_path.stem == Path(pose.image_name).stem:
+            self._load_detections(pose)
+            self.statusBar().showMessage(f"检测完成: {out_path.name}")
+        else:
+            self.statusBar().showMessage(f"检测完成并已缓存: {out_path.name}")
+
+    def _on_detection_failed(self, message: str):
+        self.lbl_detection.setText(f"检测失败\n{message}")
+        self.statusBar().showMessage("检测失败")
+
+    def _clear_detection_worker(self):
+        self.btn_detect_current.setEnabled(True)
+        self._det_thread = None
+        self._det_worker = None
+
+    def _on_point_clicked(self, idx: int):
+        if not self.dataset or self.current_idx < 0:
+            return
+        if idx < 0:
+            self.lbl_detection.setText("点击: 未吸附到点云点")
+            self.scene.set_highlight_mask(None)
+            self.scene.set_selected_detection(-1)
+            return
+        if not self.current_detections:
+            self.lbl_detection.setText("点击: 当前 keyframe 没有检测 JSON")
+            self.scene.set_highlight_mask(None)
+            self.scene.set_selected_detection(-1)
+            return
+
+        pose = self.dataset.poses[self.current_idx]
+        img_w, img_h = self.current_image_size or (0, 0)
+        if img_w <= 0 or img_h <= 0:
+            image_path = self.dataset.image_dir / pose.image_name
+            from PIL import Image
+            with Image.open(image_path) as img:
+                img_w, img_h = img.size
+        R = rotation_from_angle(pose.roll, pose.pitch, pose.yaw)
+        yaw_offset = float(self.yaw_offset.currentData())
+        uv = project_points_to_panorama(
+            self.dataset.points,
+            pose.position,
+            R,
+            img_w,
+            img_h,
+            yaw_offset_deg=yaw_offset,
+        )
+        selection = select_detection_region(
+            clicked_idx=idx,
+            uv=uv,
+            detections=self.current_detections,
+            pano_w=float(img_w),
+        )
+        if selection.detection_index < 0:
+            self.scene.set_highlight_mask(None)
+            self.scene.set_selected_detection(-1)
+            self.lbl_detection.setText(
+                f"点击点 #{idx}\n未落入 door/window bbox\nuv: ({uv[idx,0]:.1f}, {uv[idx,1]:.1f})"
+            )
+            return
+        self.scene.set_highlight_mask(selection.mask)
+        self.scene.set_selected_detection(selection.detection_index)
+        score = f"{selection.score:.3f}" if selection.score is not None else "—"
+        self.lbl_detection.setText(
+            f"命中 #{selection.detection_index} {selection.label} score={score}\n"
+            f"points: {selection.point_count:,}\n"
+            f"uv: ({uv[idx,0]:.1f}, {uv[idx,1]:.1f})"
+        )
 
     # 全屏快捷键转给 scene
     def keyPressEvent(self, e):

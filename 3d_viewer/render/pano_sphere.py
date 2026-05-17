@@ -150,6 +150,9 @@ class PanoSphere:
         self.prog["img_h"].value = self.img_h
         self.prog["pano"].value = 0
         # 全景作为背景先画，点云随后用 depth test 覆盖在它之上。
+        # 关闭深度写入：球面深度不应覆盖任何真实点云，尤其是距相机 > 50m 的点。
         self.ctx.disable(moderngl.DEPTH_TEST)
+        self.ctx.depth_mask = False
         self.vao.render()
+        self.ctx.depth_mask = True
         self.ctx.enable(moderngl.DEPTH_TEST)

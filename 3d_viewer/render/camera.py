@@ -22,25 +22,22 @@ class Camera:
         self.fov_deg = 75.0
         self.znear = 0.05
         self.zfar = 500.0
-        # 由外部 set_keyframe 注入：当前 keyframe 的 R_pano (世界 -> pano 局部)
-        # 视角默认对齐 keyframe 的"前方"方向
-        self._R_pano: np.ndarray | None = None
-        self._initial_yaw_offset = 0.0  # 跳到 keyframe 时把 yaw=0 视作朝 keyframe 的前方
+        self._keyframe_yaw_deg = 0.0  # 当前 keyframe 的"自然前方"yaw，供 reset_view 使用
 
     # ------- keyframe 切换 -------
 
     def set_keyframe(self, position: np.ndarray, roll: float, pitch: float, yaw: float):
-        """跳到一个新的全景采样点。重置 yaw/pitch 到该 keyframe 的"前方"。"""
-        self.position = np.asarray(position, dtype=np.float64).copy()
-        self._R_pano = rotation_from_angle(roll, pitch, yaw)
-        # 默认让用户视角朝向 +X（世界），不强行对齐 keyframe 朝向。
-        # 若需要对齐 keyframe 自身朝向，可从 R_pano 推算并赋 yaw_deg.
-        self.yaw_deg = 0.0
-        self.pitch_deg = 0.0
+        """跳到新的全景采样点，自动把视角对齐到全景的"自然前方"。
 
-    @property
-    def R_pano(self) -> np.ndarray | None:
-        return self._R_pano
+        当全景水平校准为 -90° 时，全景中心列对应 pano local +X 方向。
+        该方向在世界系中为 R_pano^T @ (1,0,0) = R_pano[0,:]，
+        对应的 viewer yaw = atan2(R[0,1], R[0,0])。
+        """
+        self.position = np.asarray(position, dtype=np.float64).copy()
+        R = rotation_from_angle(roll, pitch, yaw)
+        self._keyframe_yaw_deg = float(np.degrees(np.arctan2(R[0, 1], R[0, 0])))
+        self.yaw_deg = self._keyframe_yaw_deg
+        self.pitch_deg = 0.0
 
     # ------- 鼠标交互 -------
 
@@ -68,9 +65,11 @@ class Camera:
         target = eye + self.look_dir()
         up = np.array([0.0, 0.0, 1.0])
         f = _normalize(target - eye)
-        s = _normalize(np.cross(f, up))
-        if np.linalg.norm(s) < 1e-8:  # 视线和 up 平行
+        raw_s = np.cross(f, up)
+        if np.linalg.norm(raw_s) < 1e-6:  # 视线和 up 平行
             s = np.array([1.0, 0.0, 0.0])
+        else:
+            s = _normalize(raw_s)
         u = np.cross(s, f)
         M = np.eye(4, dtype=np.float64)
         M[0, :3] = s
