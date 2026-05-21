@@ -6,6 +6,8 @@ PySide6 + ModernGL 实现的桌面查看器：
 - 全景作为天空盒，永远以相机为球心（背景策略 B）
 - Keyframe 跳跃（在该点上转视角，不能自由飞行）
 - 鼠标 hover 时吸附最近点云点，显示 (X, Y, Z) + RGB
+- 当前 keyframe 门窗检测、检测框显示、点云区域高亮
+- 内置平铺全景框编辑器，可手动画/删 door/window 框并回写到 3D 视图
 
 ## 安装
 
@@ -15,6 +17,15 @@ cd /Users/gengchen/Desktop/3dtiqu
 ```
 
 ## 运行
+
+macOS 推荐直接双击或执行根目录启动脚本：
+
+```bash
+cd /Users/gengchen/Desktop/3dtiqu
+./run_3d_viewer.command
+```
+
+也可以手动启动：
 
 ```bash
 cd /Users/gengchen/Desktop/3dtiqu
@@ -35,13 +46,37 @@ cd /Users/gengchen/Desktop/3dtiqu
 | 2 | 显隐点云 |
 | R | 重置视角 |
 
+## 门窗检测与手工框
+
+右侧面板提供门窗相关操作：
+
+- `检测模式`：`精准模式` 用于减少误检，`召回模式` 用于尽量找全门窗。
+- `检测当前帧`：对当前 keyframe 全景图运行 OWLv2 检测，结果保存到 `out/door_window_detections/`。
+- `显示检测框`：在 3D 全景视图中显示/隐藏当前帧检测框。
+- `门窗选择`：开启后点击点云点，如果该点投影落入 door/window 框，会批量高亮同一框内的点云点。
+- `编辑当前全景框`：在主窗口左侧切换到平铺全景编辑器，不打开浏览器。
+
+平铺全景编辑器操作：
+
+- 拖拽画框；
+- 点击已有框选中；
+- `Delete` 删除选中框；
+- 通过类别下拉框设置 `window` 或 `door`；
+- 点击 `编辑结束` 保存并返回 3D 视图；
+- 点击 `取消编辑` 放弃本次编辑并返回。
+
+手工框保存到 `out/door_window_annotations/<image_stem>.json`。3D Viewer 会优先读取手工框，其次读取模型检测结果，因此手工修正可以覆盖漏检和误检。
+
 ## 目录结构
 
 ```
 3d_viewer/
 ├── main.py                    入口
 ├── core/
+│   ├── annotations.py         手工门窗框 JSON 保存
 │   ├── dataset.py             camera_pos.cam 解析 + LAS 抽样加载
+│   ├── detection_cache.py     检测/手工框缓存路径查找
+│   ├── detection_runner.py    当前帧 OWLv2 检测调用
 │   └── projection.py          rotation_from_angle (与算法例子保持一致)
 ├── render/
 │   ├── camera.py              单一 Camera 对象
@@ -50,7 +85,8 @@ cd /Users/gengchen/Desktop/3dtiqu
 │   ├── picking.py             屏幕空间最近点查询
 │   └── scene_view.py          ModernGL widget，组合渲染
 └── ui/
-    └── main_window.py         Qt 主窗口
+    ├── main_window.py         Qt 主窗口
+    └── pano_annotation_editor.py  内置平铺全景框编辑器
 ```
 
 ## 性能 & 限制

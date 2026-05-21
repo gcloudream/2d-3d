@@ -9,7 +9,7 @@ from PySide6.QtCore import QObject, QThread, Qt, Signal
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QHBoxLayout, QLabel, QListWidget, QMainWindow,
     QMessageBox, QPushButton, QSlider, QSplitter, QStatusBar, QVBoxLayout, QWidget,
-    QComboBox,
+    QComboBox, QStackedWidget,
 )
 
 from core.dataset import CameraPose, Dataset, find_default_dataset, load_dataset
@@ -18,6 +18,7 @@ from core.detection_runner import DETECTION_MODE_LABELS, run_detection_for_image
 from core.door_window import select_detection_region
 from core.projection import project_points_to_panorama, rotation_from_angle
 from render.scene_view import SceneView
+from ui.pano_annotation_editor import PanoAnnotationEditor
 
 
 class DetectionWorker(QObject):
@@ -55,6 +56,12 @@ class MainWindow(QMainWindow):
         self.scene = SceneView()
         self.scene.hover_changed.connect(self._on_hover)
         self.scene.point_clicked.connect(self._on_point_clicked)
+        self.editor = PanoAnnotationEditor(self.workspace)
+        self.editor.saved.connect(self._on_annotation_saved)
+        self.editor.canceled.connect(self._exit_annotation_editor)
+        self.view_stack = QStackedWidget()
+        self.view_stack.addWidget(self.scene)
+        self.view_stack.addWidget(self.editor)
 
         self.list = QListWidget()
         self.list.currentRowChanged.connect(self._on_select)
@@ -80,6 +87,9 @@ class MainWindow(QMainWindow):
 
         self.btn_detect_current = QPushButton("检测当前帧")
         self.btn_detect_current.clicked.connect(self._detect_current_frame)
+
+        self.btn_edit_current = QPushButton("编辑当前全景框")
+        self.btn_edit_current.clicked.connect(self._edit_current_frame)
 
         self.det_mode = QComboBox()
         self.det_mode.addItem("精准模式", "precise")
@@ -138,6 +148,7 @@ class MainWindow(QMainWindow):
         v.addWidget(QLabel("检测模式"))
         v.addWidget(self.det_mode)
         v.addWidget(self.btn_detect_current)
+        v.addWidget(self.btn_edit_current)
 
         v.addWidget(QLabel("点大小"))
         v.addWidget(self.size_slider)
@@ -154,7 +165,7 @@ class MainWindow(QMainWindow):
                           " · 1/2: 显隐全景/点云 · R: 重置"))
 
         sp = QSplitter(Qt.Horizontal)
-        sp.addWidget(self.scene); sp.addWidget(side)
+        sp.addWidget(self.view_stack); sp.addWidget(side)
         sp.setSizes([1180, 320])
         self.setCentralWidget(sp)
 
@@ -304,6 +315,30 @@ class MainWindow(QMainWindow):
         self._det_thread = thread
         self._det_worker = worker
         thread.start()
+
+    def _edit_current_frame(self):
+        if not self.dataset or self.current_idx < 0:
+            return
+        pose = self.dataset.poses[self.current_idx]
+        image_path = self.dataset.image_dir / pose.image_name
+        if not image_path.exists():
+            QMessageBox.warning(self, "缺图", str(image_path))
+            return
+        self.editor.load_image(image_path, self.current_detections)
+        self.view_stack.setCurrentWidget(self.editor)
+        self.statusBar().showMessage(
+            "正在编辑当前全景框：拖拽画框，点击框选中，Delete 删除，编辑结束保存"
+        )
+
+    def _on_annotation_saved(self, path_text: str):
+        self._exit_annotation_editor()
+        if self.dataset and self.current_idx >= 0:
+            pose = self.dataset.poses[self.current_idx]
+            self._load_detections(pose)
+        self.statusBar().showMessage(f"手工框已保存: {Path(path_text).name}")
+
+    def _exit_annotation_editor(self):
+        self.view_stack.setCurrentWidget(self.scene)
 
     def _on_detection_finished(self, path_text: str):
         if not self.dataset or self.current_idx < 0:
