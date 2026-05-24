@@ -41,18 +41,88 @@ class _QuietHandler(http.server.SimpleHTTPRequestHandler):
     """静音版 SimpleHTTPRequestHandler，只在出错时打印。"""
     # 由 main() 在启动前注入：访问 / 时跳转到的 viewer URL
     redirect_target: str | None = None
+    workspace_root: Path = WORKSPACE_ROOT
 
     def log_message(self, fmt, *args):
         if "200" not in (args[1] if len(args) > 1 else ""):
             super().log_message(fmt, *args)
 
     def do_GET(self):
+        if self.path.startswith("/api/annotations"):
+            self._serve_annotations()
+            return
         if self.path in ("/", "") and self.redirect_target:
             self.send_response(302)
             self.send_header("Location", self.redirect_target)
             self.end_headers()
             return
         super().do_GET()
+
+    def _serve_annotations(self):
+        parsed = urllib.parse.urlparse(self.path)
+        params = urllib.parse.parse_qs(parsed.query)
+        image_values = params.get("image", [])
+        if not image_values:
+            self.send_error(400, "missing image")
+            return
+        image_name = Path(image_values[0]).name
+        stem = Path(image_name).stem
+        candidates = [
+            self.workspace_root / "out" / "door_window_annotations" / f"{stem}.json",
+            self.workspace_root / "out" / "door_window_detections" / f"{stem}.json",
+            self.workspace_root / "out" / "door_window_detections" / f"{stem}_recall.json",
+            self.workspace_root / "2d" / "out" / f"{stem}.json",
+            self.workspace_root / "2d" / "out_example_owlv2" / f"{stem}.json",
+        ]
+        data = {"detections": []}
+        for path in candidates:
+            if path.exists():
+                data = json.loads(path.read_text(encoding="utf-8"))
+                break
+        body = json.dumps(data, ensure_ascii=False).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def do_POST(self):
+        if self.path != "/api/save_annotations":
+            self.send_error(404, "not found")
+            return
+        try:
+            n = int(self.headers.get("Content-Length", "0"))
+            payload = json.loads(self.rfile.read(n).decode("utf-8"))
+            image_rel = Path(str(payload["image"]))
+            image_name = image_rel.name
+            detections = list(payload.get("detections", []))
+            width = int(payload.get("width", 0))
+            height = int(payload.get("height", 0))
+        except Exception as e:
+            self.send_error(400, f"bad payload: {e}")
+            return
+
+        out_dir = self.workspace_root / "out" / "door_window_annotations"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / f"{Path(image_name).stem}.json"
+        image_path = (self.workspace_root / image_rel).resolve()
+        data = {
+            "image": str(image_path),
+            "width": width,
+            "height": height,
+            "model": "manual",
+            "classes": ["door", "window"],
+            "source": "pano_viewer_manual",
+            "detections": detections,
+        }
+        out_path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        body = json.dumps({"ok": True, "path": str(out_path)}, ensure_ascii=False).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
 
 def main():
@@ -84,13 +154,14 @@ def main():
             print(f"[error] image {img} is outside workspace {WORKSPACE_ROOT}",
                   file=sys.stderr); sys.exit(1)
 
-    cfg = {"images": rel_imgs}
+    cfg = {"images": rel_imgs, "edit": True}
     fragment = urllib.parse.quote(json.dumps(cfg))
     viewer_path = f"/{VIEWER_HTML_REL}#{fragment}"
     url = f"http://127.0.0.1:{args.port}{viewer_path}"
 
     os.chdir(WORKSPACE_ROOT)
     _QuietHandler.redirect_target = viewer_path
+    _QuietHandler.workspace_root = WORKSPACE_ROOT
     try:
         httpd = socketserver.ThreadingTCPServer(("127.0.0.1", args.port),
                                                 _QuietHandler)

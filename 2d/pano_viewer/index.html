@@ -4,108 +4,152 @@
 <meta charset="utf-8">
 <title>Panorama Viewer</title>
 <style>
-  html,body { margin:0; padding:0; overflow:hidden; background:#000; height:100%;
-              font-family:-apple-system,BlinkMacSystemFont,sans-serif; color:#eee; }
-  #info, #help { position:absolute; padding:6px 10px; background:rgba(0,0,0,.55);
-                 border-radius:4px; font-size:13px; pointer-events:none;
-                 white-space:nowrap; max-width:90vw; overflow:hidden;
-                 text-overflow:ellipsis; }
-  #info { top:10px; left:10px; }
-  #help { bottom:10px; left:10px; font-size:12px; opacity:.85; }
-  #nav { position:absolute; top:10px; right:10px; display:flex; gap:6px; }
-  #nav button { background:#222; color:#eee; border:1px solid #444;
-                padding:6px 12px; border-radius:4px; cursor:pointer; font-size:13px; }
-  #nav button:hover { background:#333; }
-  #nav button:disabled { opacity:.4; cursor:not-allowed; }
+  :root { color-scheme: dark; --panel: rgba(14,15,17,.78); --line:#3d4148; --text:#f3f3f1; }
+  html,body { margin:0; padding:0; overflow:hidden; background:#050506; height:100%;
+              font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",sans-serif; color:var(--text); }
   canvas { display:block; }
+  #info, #help, #tools, #list {
+    position:absolute; background:var(--panel); border:1px solid rgba(255,255,255,.12);
+    box-shadow:0 10px 30px rgba(0,0,0,.28); backdrop-filter: blur(14px);
+  }
+  #info { top:10px; left:10px; padding:7px 10px; border-radius:6px; font-size:13px;
+          max-width:52vw; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; pointer-events:none; }
+  #help { bottom:10px; left:10px; padding:7px 10px; border-radius:6px; font-size:12px; opacity:.9; pointer-events:none; }
+  #tools { top:10px; right:10px; display:grid; grid-template-columns:repeat(3, auto); gap:6px; padding:8px; border-radius:8px; }
+  button, select { background:#202328; color:var(--text); border:1px solid #444952; padding:6px 10px; border-radius:6px;
+                   font-size:13px; cursor:pointer; }
+  button:hover, select:hover { background:#2a2e35; }
+  button.active { background:#0b5fff; border-color:#4f8cff; }
+  button:disabled { opacity:.4; cursor:not-allowed; }
+  #list { right:10px; top:66px; width:280px; max-height:45vh; overflow:auto; border-radius:8px; padding:8px; font-size:12px; }
+  .row { display:grid; grid-template-columns:1fr auto; gap:6px; align-items:center; padding:5px 6px; border-bottom:1px solid rgba(255,255,255,.08); }
+  .row:last-child { border-bottom:0; }
+  .row span { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .row button { padding:3px 7px; font-size:12px; }
+  #editLayer { display:none; position:absolute; inset:0; background:#111; overflow:auto; }
+  #editWrap { position:relative; width:max-content; height:max-content; }
+  #flatImg { display:block; user-select:none; -webkit-user-drag:none; max-width:none; }
+  #boxLayer { position:absolute; inset:0; }
+  .box { position:absolute; border:4px solid #00d8ff; box-sizing:border-box; background:rgba(0,216,255,.08); }
+  .box.door { border-color:#ff9d2e; background:rgba(255,157,46,.10); }
+  .box.selected { border-color:#ff2a2a; background:rgba(255,42,42,.12); }
+  .box .tag { position:absolute; left:-4px; top:-28px; padding:3px 6px; background:#000; color:#fff; font-size:13px; border-radius:4px 4px 0 0; }
+  .draft { position:absolute; border:3px dashed #fff; background:rgba(255,255,255,.08); box-sizing:border-box; pointer-events:none; }
 </style>
 </head>
 <body>
 <div id="info">loading…</div>
-<div id="nav">
-  <button id="prev">◀ Prev</button>
-  <button id="next">Next ▶</button>
-  <button id="reset">⟳ Reset</button>
+<div id="tools">
+  <button id="prev">◀</button>
+  <button id="next">▶</button>
+  <button id="reset">⟳</button>
+  <button id="edit">Edit</button>
+  <select id="label"><option value="window">window</option><option value="door">door</option></select>
+  <button id="save">Save</button>
 </div>
-<div id="help">Drag: look around · Wheel: zoom · ←/→: prev/next · R: reset view</div>
+<div id="list"></div>
+<div id="help">View: drag look · wheel zoom · ←/→ image · R reset. Edit: drag to draw · click box select · Delete remove · Save writes annotation JSON.</div>
+<div id="editLayer"><div id="editWrap"><img id="flatImg"><div id="boxLayer"></div></div></div>
 
 <script type="importmap">
-{ "imports": {
-    "three": "https://unpkg.com/three@0.160.0/build/three.module.js"
-}}
+{ "imports": { "three": "https://unpkg.com/three@0.160.0/build/three.module.js" }}
 </script>
 
 <script type="module">
 import * as THREE from 'three';
 
-// 配置从 URL hash 读：{"images": ["a.jpg", "b.jpg", ...]}
 let cfg = {};
 try { cfg = JSON.parse(decodeURIComponent(location.hash.slice(1)) || '{}'); } catch (e) {}
 const images = cfg.images || [];
 let idx = 0;
+let boxesByImage = new Map();
+let editMode = false;
+let selectedBox = -1;
+let imgNatural = {w:0, h:0};
+const startInEdit = cfg.edit === true;
 
 const info = document.getElementById('info');
 const prevBtn = document.getElementById('prev');
 const nextBtn = document.getElementById('next');
+const resetBtn = document.getElementById('reset');
+const editBtn = document.getElementById('edit');
+const labelSel = document.getElementById('label');
+const saveBtn = document.getElementById('save');
+const list = document.getElementById('list');
+const editLayer = document.getElementById('editLayer');
+const flatImg = document.getElementById('flatImg');
+const boxLayer = document.getElementById('boxLayer');
 
-// === 场景 ===
 const scene = new THREE.Scene();
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1100);
 camera.position.set(0, 0, 0);
-
 const renderer = new THREE.WebGLRenderer({antialias: true});
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setSize(window.innerWidth, window.innerHeight);
 document.body.appendChild(renderer.domElement);
 
-// 内表面 sphere：把法线翻转，贴图就贴在里侧
 const geom = new THREE.SphereGeometry(500, 96, 64);
 geom.scale(-1, 1, 1);
-const material = new THREE.MeshBasicMaterial({color: 0x111111});
-const sphere = new THREE.Mesh(geom, material);
+const sphere = new THREE.Mesh(geom, new THREE.MeshBasicMaterial({color: 0x111111}));
 scene.add(sphere);
 
-// === 鼠标拖动看四周（经典 lon/lat 球面相机）===
 let lon = 0, lat = 0;
 let isDown = false, dx = 0, dy = 0, downLon = 0, downLat = 0;
-
 const canvas = renderer.domElement;
 canvas.addEventListener('pointerdown', (e) => {
-  isDown = true; dx = e.clientX; dy = e.clientY;
-  downLon = lon; downLat = lat;
+  if (editMode) return;
+  isDown = true; dx = e.clientX; dy = e.clientY; downLon = lon; downLat = lat;
   canvas.setPointerCapture(e.pointerId);
 });
-canvas.addEventListener('pointerup',   (e) => { isDown = false; canvas.releasePointerCapture?.(e.pointerId); });
+canvas.addEventListener('pointerup', (e) => { isDown = false; canvas.releasePointerCapture?.(e.pointerId); });
 canvas.addEventListener('pointermove', (e) => {
-  if (!isDown) return;
-  // 拖动方向 = 视角反向（推动场景的感觉）
+  if (!isDown || editMode) return;
   lon = downLon - (e.clientX - dx) * 0.15;
   lat = Math.max(-85, Math.min(85, downLat + (e.clientY - dy) * 0.15));
 });
-
 window.addEventListener('wheel', (e) => {
+  if (editMode) return;
   e.preventDefault();
   camera.fov = Math.min(110, Math.max(20, camera.fov + e.deltaY * 0.05));
   camera.updateProjectionMatrix();
-}, {passive: false});
-
+}, {passive:false});
 window.addEventListener('resize', () => {
   camera.aspect = window.innerWidth / window.innerHeight;
   camera.updateProjectionMatrix();
   renderer.setSize(window.innerWidth, window.innerHeight);
 });
 
-// === 加载贴图 ===
-const loader = new THREE.TextureLoader();
+function currentRaw() { return images[idx] || ''; }
+function currentUrl() {
+  const raw = currentRaw();
+  return raw.startsWith('/') || /^https?:/.test(raw) ? raw : '/' + raw;
+}
+function boxes() {
+  const raw = currentRaw();
+  if (!boxesByImage.has(raw)) boxesByImage.set(raw, []);
+  return boxesByImage.get(raw);
+}
+async function loadBoxes(raw) {
+  if (boxesByImage.has(raw)) return;
+  boxesByImage.set(raw, []);
+  try {
+    const res = await fetch(`/api/annotations?image=${encodeURIComponent(raw)}`);
+    if (!res.ok) return;
+    const data = await res.json();
+    boxesByImage.set(raw, Array.isArray(data.detections) ? data.detections : []);
+  } catch (e) {
+    console.warn('annotation load failed', e);
+  }
+}
 function loadIdx(i) {
   if (!images.length) { info.textContent = 'no images'; return; }
   idx = (i + images.length) % images.length;
-  // 强制 server 根的绝对路径，避免相对到 viewer html 所在的子目录
-  const raw = images[idx];
-  const url = raw.startsWith('/') || /^https?:/.test(raw) ? raw : '/' + raw;
+  selectedBox = -1;
+  const raw = currentRaw();
+  const url = currentUrl();
   info.textContent = `loading [${idx + 1}/${images.length}] ${raw}`;
   prevBtn.disabled = nextBtn.disabled = true;
-  loader.load(url, (tex) => {
+  new THREE.TextureLoader().load(url, (tex) => {
     tex.colorSpace = THREE.SRGBColorSpace;
     tex.minFilter = THREE.LinearFilter;
     tex.magFilter = THREE.LinearFilter;
@@ -117,36 +161,141 @@ function loadIdx(i) {
     prevBtn.disabled = nextBtn.disabled = images.length < 2;
   }, undefined, (err) => {
     info.textContent = `load failed: ${raw}`;
-    prevBtn.disabled = nextBtn.disabled = images.length < 2;
     console.error(err);
   });
+  flatImg.onload = () => {
+    imgNatural = {w: flatImg.naturalWidth, h: flatImg.naturalHeight};
+    renderBoxes();
+  };
+  flatImg.src = url;
+  loadBoxes(raw).then(() => {
+    renderBoxes();
+    renderList();
+  });
+}
+
+function setEdit(on) {
+  editMode = on;
+  editBtn.classList.toggle('active', on);
+  editLayer.style.display = on ? 'block' : 'none';
+  renderer.domElement.style.display = on ? 'none' : 'block';
+  list.style.display = on ? 'block' : 'none';
+  renderBoxes();
+}
+
+function renderBoxes() {
+  boxLayer.innerHTML = '';
+  const sx = flatImg.clientWidth / Math.max(1, imgNatural.w);
+  const sy = flatImg.clientHeight / Math.max(1, imgNatural.h);
+  boxes().forEach((b, i) => {
+    const el = document.createElement('div');
+    el.className = `box ${b.label || 'window'} ${i === selectedBox ? 'selected' : ''}`;
+    el.style.left = `${b.bbox[0] * sx}px`;
+    el.style.top = `${b.bbox[1] * sy}px`;
+    el.style.width = `${(b.bbox[2] - b.bbox[0]) * sx}px`;
+    el.style.height = `${(b.bbox[3] - b.bbox[1]) * sy}px`;
+    el.innerHTML = `<div class="tag">${b.label || 'window'} ${i + 1}</div>`;
+    el.onclick = (ev) => { ev.stopPropagation(); selectedBox = i; renderBoxes(); renderList(); };
+    boxLayer.appendChild(el);
+  });
+  renderList();
+}
+
+function renderList() {
+  list.innerHTML = '';
+  boxes().forEach((b, i) => {
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.innerHTML = `<span>${i + 1}. ${b.label || 'window'} [${b.bbox.map(v => Math.round(v)).join(', ')}]</span>`;
+    const del = document.createElement('button');
+    del.textContent = 'Delete';
+    del.onclick = () => { boxes().splice(i, 1); selectedBox = -1; renderBoxes(); };
+    row.onclick = () => { selectedBox = i; renderBoxes(); };
+    row.appendChild(del);
+    list.appendChild(row);
+  });
+}
+
+let draft = null, start = null;
+boxLayer.addEventListener('pointerdown', (e) => {
+  if (!editMode || e.target !== boxLayer) return;
+  const rect = boxLayer.getBoundingClientRect();
+  start = {x:e.clientX - rect.left, y:e.clientY - rect.top};
+  draft = document.createElement('div');
+  draft.className = 'draft';
+  boxLayer.appendChild(draft);
+});
+boxLayer.addEventListener('pointermove', (e) => {
+  if (!draft || !start) return;
+  const rect = boxLayer.getBoundingClientRect();
+  const x = e.clientX - rect.left, y = e.clientY - rect.top;
+  const x1 = Math.min(start.x, x), y1 = Math.min(start.y, y);
+  const x2 = Math.max(start.x, x), y2 = Math.max(start.y, y);
+  draft.style.left = `${x1}px`; draft.style.top = `${y1}px`;
+  draft.style.width = `${x2 - x1}px`; draft.style.height = `${y2 - y1}px`;
+});
+boxLayer.addEventListener('pointerup', (e) => {
+  if (!draft || !start) return;
+  const rect = boxLayer.getBoundingClientRect();
+  const x = e.clientX - rect.left, y = e.clientY - rect.top;
+  const x1 = Math.min(start.x, x), y1 = Math.min(start.y, y);
+  const x2 = Math.max(start.x, x), y2 = Math.max(start.y, y);
+  draft.remove(); draft = null; start = null;
+  if ((x2 - x1) < 8 || (y2 - y1) < 8) return;
+  const sx = imgNatural.w / flatImg.clientWidth;
+  const sy = imgNatural.h / flatImg.clientHeight;
+  boxes().push({
+    label: labelSel.value,
+    score: 1.0,
+    source: 'manual',
+    bbox: [x1 * sx, y1 * sy, x2 * sx, y2 * sy],
+  });
+  selectedBox = boxes().length - 1;
+  renderBoxes();
+});
+
+async function saveAnnotations() {
+  if (!imgNatural.w || !imgNatural.h) return;
+  const payload = {
+    image: currentRaw(),
+    width: imgNatural.w,
+    height: imgNatural.h,
+    detections: boxes(),
+  };
+  const res = await fetch('/api/save_annotations', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(payload),
+  });
+  const data = await res.json();
+  info.textContent = data.ok ? `saved ${data.path}` : 'save failed';
 }
 
 prevBtn.onclick = () => loadIdx(idx - 1);
 nextBtn.onclick = () => loadIdx(idx + 1);
-document.getElementById('reset').onclick = () => {
-  camera.fov = 75; camera.updateProjectionMatrix();
-  lon = 0; lat = 0;
-};
+resetBtn.onclick = () => { camera.fov = 75; camera.updateProjectionMatrix(); lon = 0; lat = 0; };
+editBtn.onclick = () => setEdit(!editMode);
+saveBtn.onclick = saveAnnotations;
 window.addEventListener('keydown', (e) => {
-  if (e.key === 'ArrowLeft')  loadIdx(idx - 1);
+  if (e.key === 'Delete' && selectedBox >= 0) {
+    boxes().splice(selectedBox, 1); selectedBox = -1; renderBoxes(); return;
+  }
+  if (editMode) return;
+  if (e.key === 'ArrowLeft') loadIdx(idx - 1);
   else if (e.key === 'ArrowRight') loadIdx(idx + 1);
-  else if (e.key === 'r' || e.key === 'R') document.getElementById('reset').click();
+  else if (e.key === 'r' || e.key === 'R') resetBtn.click();
 });
 
-// === 渲染循环 ===
 function animate() {
   requestAnimationFrame(animate);
-  const phi   = THREE.MathUtils.degToRad(90 - lat);
+  const phi = THREE.MathUtils.degToRad(90 - lat);
   const theta = THREE.MathUtils.degToRad(lon);
-  const tx = 500 * Math.sin(phi) * Math.cos(theta);
-  const ty = 500 * Math.cos(phi);
-  const tz = 500 * Math.sin(phi) * Math.sin(theta);
-  camera.lookAt(tx, ty, tz);
-  renderer.render(scene, camera);
+  camera.lookAt(500 * Math.sin(phi) * Math.cos(theta), 500 * Math.cos(phi), 500 * Math.sin(phi) * Math.sin(theta));
+  if (!editMode) renderer.render(scene, camera);
 }
 animate();
 loadIdx(0);
+if (startInEdit) setEdit(true);
 </script>
 </body>
 </html>
