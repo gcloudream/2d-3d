@@ -85,6 +85,10 @@ class PointCloud:
         self.colors: np.ndarray | None = None
         self.point_size = 2.0
         self.highlight = -1
+        self.selected_depth_test = False
+
+    def set_selected_depth_test(self, on: bool):
+        self.selected_depth_test = bool(on)
 
     def upload(self, points: np.ndarray, colors: np.ndarray):
         for buf in (self.vbo_pos, self.vbo_col):
@@ -149,6 +153,8 @@ class PointCloud:
         if self.selected_vao is not None and self.selected_n > 0:
             self.selected_prog["mvp"].write(mvp.T.tobytes())
             self.selected_prog["point_size"].value = max(8.0, float(self.point_size) * 5.0)
-            self.ctx.disable(moderngl.DEPTH_TEST)
+            if not self.selected_depth_test:
+                self.ctx.disable(moderngl.DEPTH_TEST)
             self.selected_vao.render(mode=moderngl.POINTS)
-            self.ctx.enable(moderngl.DEPTH_TEST)
+            if not self.selected_depth_test:
+                self.ctx.enable(moderngl.DEPTH_TEST)

@@ -48,6 +48,7 @@ class GeometryScore:
     plane_rms_error: float | None
     inlier_ratio: float | None = None
     rectangular_coverage: float | None = None
+    inlier_mask: np.ndarray | None = None
 
 
 @dataclass(frozen=True)
@@ -318,6 +319,7 @@ def score_door_window_geometry(
             plane.rms_error,
             plane.inlier_ratio,
             coverage,
+            inlier_mask,
         )
 
     if plane.rms_error > float(max_plane_rms_error):
@@ -331,6 +333,7 @@ def score_door_window_geometry(
             plane.rms_error,
             plane.inlier_ratio,
             coverage,
+            inlier_mask,
         )
 
     if abs(float(plane.normal[2])) > float(vertical_normal_z_max):
@@ -344,6 +347,7 @@ def score_door_window_geometry(
             plane.rms_error,
             plane.inlier_ratio,
             coverage,
+            inlier_mask,
         )
 
     if coverage < float(min_rectangular_coverage):
@@ -357,6 +361,7 @@ def score_door_window_geometry(
             plane.rms_error,
             plane.inlier_ratio,
             coverage,
+            inlier_mask,
         )
 
     clean_label = str(label).lower()
@@ -374,6 +379,7 @@ def score_door_window_geometry(
                 plane.rms_error,
                 plane.inlier_ratio,
                 coverage,
+                inlier_mask,
             )
 
     accepted_label = clean_label if clean_label in DIMENSION_LIMITS else "object"
@@ -387,6 +393,7 @@ def score_door_window_geometry(
         plane.rms_error,
         plane.inlier_ratio,
         coverage,
+        inlier_mask,
     )
 
 
@@ -449,7 +456,8 @@ def refine_detection_selection(
     plane_rms_error = None
 
     if point_count >= max(int(min_refined_points), DEFAULT_MIN_GEOMETRY_POINTS):
-        geometry = score_door_window_geometry(points_arr[depth_mask], str(det.get("label", "")))
+        depth_indices = np.flatnonzero(depth_mask)
+        geometry = score_door_window_geometry(points_arr[depth_indices], str(det.get("label", "")))
         confidence = geometry.confidence
         reason = geometry.reason
         plane_point = geometry.plane_point
@@ -457,6 +465,11 @@ def refine_detection_selection(
         width_m = geometry.width_m
         height_m = geometry.height_m
         plane_rms_error = geometry.plane_rms_error
+        if confidence == "high" and geometry.inlier_mask is not None:
+            refined_mask = np.zeros(n, dtype=bool)
+            refined_mask[depth_indices[np.asarray(geometry.inlier_mask, dtype=bool)]] = True
+            depth_mask = refined_mask
+            point_count = int(depth_mask.sum())
 
     return RefinedDoorWindowSelection(
         detection_index=det_idx,

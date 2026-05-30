@@ -79,6 +79,9 @@ class SceneView(QWidget):
     def set_highlight_mask(self, mask: np.ndarray | None):
         self.gl_window.set_highlight_mask(mask)
 
+    def set_selected_depth_test(self, on: bool):
+        self.gl_window.set_selected_depth_test(on)
+
     def set_pick_mode(self, on: bool):
         self.gl_window.set_pick_mode(on)
 
@@ -125,6 +128,7 @@ class _SceneGLWindow(QOpenGLWindow):
         self._show_pc = True
         self._show_bboxes = True
         self._pick_mode = False
+        self._selected_depth_test = False
         self._current_pose: CameraPose | None = None
         self._detections: list[dict] = []
         self._detection_image_size = (0, 0)
@@ -225,6 +229,12 @@ class _SceneGLWindow(QOpenGLWindow):
             self._pc.set_highlight_mask(mask)
             self.update()
 
+    def set_selected_depth_test(self, on: bool):
+        self._selected_depth_test = bool(on)
+        if self._pc is not None:
+            self._pc.set_selected_depth_test(self._selected_depth_test)
+            self.update()
+
     def set_pick_mode(self, on: bool):
         self._pick_mode = bool(on)
         self._clear_hover()
@@ -278,6 +288,7 @@ class _SceneGLWindow(QOpenGLWindow):
         self._ctx.enable(moderngl.PROGRAM_POINT_SIZE)
         self._pano = PanoSphere(self._ctx)
         self._pc = PointCloud(self._ctx)
+        self._pc.set_selected_depth_test(self._selected_depth_test)
         self._bbox_overlay = BboxOverlay(self._ctx)
 
         if self._pending_points is not None:

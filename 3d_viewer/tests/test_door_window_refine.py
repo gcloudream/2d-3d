@@ -228,6 +228,33 @@ class DoorWindowRefineTest(unittest.TestCase):
         self.assertGreater(selection.width_m, 1.0)
         self.assertGreater(selection.height_m, 0.8)
 
+    def test_refine_selection_returns_only_geometry_inliers_when_outliers_pass_depth_filter(self):
+        patch = _vertical_patch(width=1.2, height=0.9)
+        outliers = np.array(
+            [[x, 0.7, z] for x, z in zip(np.linspace(-0.6, 0.6, 8), np.linspace(1.0, 1.9, 8))],
+            dtype=np.float64,
+        )
+        points = np.vstack([patch, outliers])
+        uv = np.array([[50.0 + p[0] * 10.0, 50.0 - p[2] * 10.0] for p in points], dtype=np.float64)
+        detections = [{"label": "window", "score": 0.8, "bbox": [35.0, 20.0, 65.0, 45.0]}]
+
+        selection = refine_detection_selection(
+            points=points,
+            uv=uv,
+            clicked_idx=len(patch) // 2,
+            detections=detections,
+            pano_w=100.0,
+            cam_pos=np.array([0.0, -3.0, 1.4], dtype=np.float64),
+            component_radius=1.0,
+            depth_delta=3.0,
+            min_refined_points=20,
+        )
+
+        self.assertEqual(selection.confidence, "high")
+        self.assertEqual(selection.point_count, len(patch))
+        self.assertTrue(selection.refined_mask[:len(patch)].all())
+        self.assertFalse(selection.refined_mask[len(patch):].any())
+
     def test_rejected_geometry_selection_should_not_use_normal_highlight(self):
         points = np.array([[x, 0.0, 1.0 + (x + 0.6) * 0.75] for x in np.linspace(-0.6, 0.6, 30)])
         uv = np.array([[50.0 + p[0] * 10.0, 50.0 - p[2] * 10.0] for p in points], dtype=np.float64)

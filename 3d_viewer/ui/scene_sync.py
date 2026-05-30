@@ -13,6 +13,7 @@ class SceneLike(Protocol):
     def set_pick_mode(self, on: bool): ...
     def set_point_size(self, size: float): ...
     def set_highlight_mask(self, mask: np.ndarray | None): ...
+    def set_selected_depth_test(self, on: bool): ...
 
 
 def configure_observer_scene(scene: SceneLike):
@@ -22,6 +23,8 @@ def configure_observer_scene(scene: SceneLike):
     scene.set_pick_mode(False)
     if hasattr(scene, "set_global_view_mode"):
         scene.set_global_view_mode(True)
+    if hasattr(scene, "set_selected_depth_test"):
+        scene.set_selected_depth_test(True)
 
 
 def set_scene_pair_point_size(primary: SceneLike, observer: SceneLike, size: float):
