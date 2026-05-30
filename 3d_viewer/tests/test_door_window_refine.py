@@ -12,8 +12,16 @@ sys.path.insert(0, str(ROOT))
 from core.door_window_refine import (
     connected_component_from_seed,
     filter_by_seed_depth,
+    fit_plane_least_squares,
     refine_detection_selection,
+    score_door_window_geometry,
 )
+
+
+def _vertical_patch(width: float, height: float, cols: int = 6, rows: int = 5) -> np.ndarray:
+    xs = np.linspace(-width / 2.0, width / 2.0, cols)
+    zs = np.linspace(1.0, 1.0 + height, rows)
+    return np.array([[x, 0.0, z] for z in zs for x in xs], dtype=np.float64)
 
 
 class DoorWindowRefineTest(unittest.TestCase):
@@ -147,6 +155,55 @@ class DoorWindowRefineTest(unittest.TestCase):
         self.assertEqual(selection.reason, "too_few_refined_points")
         self.assertEqual(selection.point_count, 2)
         self.assertEqual(selection.refined_mask.tolist(), [True, True, False])
+
+    def test_plane_fit_returns_horizontal_normal_for_vertical_patch(self):
+        points = _vertical_patch(width=1.2, height=0.9)
+
+        plane = fit_plane_least_squares(points)
+
+        self.assertLess(abs(float(plane.normal[2])), 0.05)
+        self.assertLess(plane.rms_error, 1e-9)
+
+    def test_geometry_score_accepts_plausible_vertical_window_patch(self):
+        points = _vertical_patch(width=1.2, height=0.9)
+
+        score = score_door_window_geometry(points, "window")
+
+        self.assertEqual(score.confidence, "high")
+        self.assertEqual(score.reason, "accepted_vertical_window_geometry")
+        self.assertGreater(score.width_m, 1.0)
+        self.assertGreater(score.height_m, 0.8)
+
+    def test_geometry_score_rejects_window_patch_that_is_too_small(self):
+        points = _vertical_patch(width=0.12, height=0.12)
+
+        score = score_door_window_geometry(points, "window")
+
+        self.assertEqual(score.confidence, "low")
+        self.assertEqual(score.reason, "rejected_implausible_window_size")
+
+    def test_refine_selection_uses_geometry_reason_for_plausible_window(self):
+        points = _vertical_patch(width=1.2, height=0.9)
+        uv = np.array([[50.0 + p[0] * 10.0, 50.0 - p[2] * 10.0] for p in points], dtype=np.float64)
+        detections = [{"label": "window", "score": 0.8, "bbox": [35.0, 20.0, 65.0, 45.0]}]
+
+        selection = refine_detection_selection(
+            points=points,
+            uv=uv,
+            clicked_idx=len(points) // 2,
+            detections=detections,
+            pano_w=100.0,
+            cam_pos=np.array([0.0, -3.0, 1.4], dtype=np.float64),
+            component_radius=0.35,
+            depth_delta=3.0,
+            min_refined_points=20,
+        )
+
+        self.assertEqual(selection.confidence, "high")
+        self.assertEqual(selection.reason, "accepted_vertical_window_geometry")
+        self.assertIsNotNone(selection.plane_normal)
+        self.assertGreater(selection.width_m, 1.0)
+        self.assertGreater(selection.height_m, 0.8)
 
 
 if __name__ == "__main__":

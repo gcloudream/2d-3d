@@ -14,6 +14,32 @@ from core.door_window import match_points_to_detections
 DEFAULT_COMPONENT_RADIUS = 0.22
 DEFAULT_DEPTH_DELTA = 0.35
 DEFAULT_MIN_REFINED_POINTS = 80
+DEFAULT_MIN_GEOMETRY_POINTS = 20
+DEFAULT_MAX_PLANE_RMS_ERROR = 0.08
+DEFAULT_VERTICAL_NORMAL_Z_MAX = 0.35
+
+DIMENSION_LIMITS = {
+    "door": (0.5, 1.5, 1.6, 2.6),
+    "window": (0.3, 3.5, 0.3, 2.2),
+}
+
+
+@dataclass(frozen=True)
+class PlaneFit:
+    point: np.ndarray
+    normal: np.ndarray
+    rms_error: float
+
+
+@dataclass(frozen=True)
+class GeometryScore:
+    confidence: str
+    reason: str
+    plane_point: np.ndarray | None
+    plane_normal: np.ndarray | None
+    width_m: float | None
+    height_m: float | None
+    plane_rms_error: float | None
 
 
 @dataclass(frozen=True)
@@ -28,6 +54,11 @@ class RefinedDoorWindowSelection:
     point_count: int
     coarse_count: int
     reason: str
+    plane_point: np.ndarray | None
+    plane_normal: np.ndarray | None
+    width_m: float | None
+    height_m: float | None
+    plane_rms_error: float | None
 
 
 def _empty_result(n: int, reason: str) -> RefinedDoorWindowSelection:
@@ -43,6 +74,11 @@ def _empty_result(n: int, reason: str) -> RefinedDoorWindowSelection:
         point_count=0,
         coarse_count=0,
         reason=reason,
+        plane_point=None,
+        plane_normal=None,
+        width_m=None,
+        height_m=None,
+        plane_rms_error=None,
     )
 
 
@@ -101,6 +137,122 @@ def filter_by_seed_depth(
     return component & depth_ok
 
 
+def fit_plane_least_squares(points: np.ndarray) -> PlaneFit:
+    pts = np.asarray(points, dtype=np.float64)
+    if pts.ndim != 2 or pts.shape[1] != 3:
+        raise ValueError("points must have shape (N, 3)")
+    if len(pts) < 3:
+        raise ValueError("at least 3 points are required to fit a plane")
+
+    centroid = pts.mean(axis=0)
+    centered = pts - centroid.reshape(1, 3)
+    _, _, vh = np.linalg.svd(centered, full_matrices=False)
+    normal = vh[-1].astype(np.float64)
+    norm = float(np.linalg.norm(normal))
+    if norm == 0.0:
+        raise ValueError("cannot fit a plane to degenerate points")
+    normal = normal / norm
+    if normal[2] < 0:
+        normal = -normal
+    distances = centered @ normal
+    rms_error = float(np.sqrt(np.mean(distances * distances)))
+    return PlaneFit(point=centroid, normal=normal, rms_error=rms_error)
+
+
+def estimate_planar_extent(points: np.ndarray, normal: np.ndarray) -> tuple[float, float]:
+    pts = np.asarray(points, dtype=np.float64)
+    n = np.asarray(normal, dtype=np.float64).reshape(3)
+    n_norm = float(np.linalg.norm(n))
+    if n_norm == 0.0:
+        raise ValueError("normal must be non-zero")
+    n = n / n_norm
+
+    z_axis = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+    height_axis = z_axis - float(np.dot(z_axis, n)) * n
+    height_norm = float(np.linalg.norm(height_axis))
+    if height_norm < 1e-6:
+        centered = pts - pts.mean(axis=0, keepdims=True)
+        _, _, vh = np.linalg.svd(centered, full_matrices=False)
+        axis_a = vh[0]
+        axis_b = vh[1]
+    else:
+        axis_b = height_axis / height_norm
+        axis_a = np.cross(axis_b, n)
+        axis_a = axis_a / float(np.linalg.norm(axis_a))
+
+    coord_a = pts @ axis_a
+    coord_b = pts @ axis_b
+    width_m = float(coord_a.max() - coord_a.min())
+    height_m = float(coord_b.max() - coord_b.min())
+    return width_m, height_m
+
+
+def score_door_window_geometry(
+    points: np.ndarray,
+    label: str,
+    min_points: int = DEFAULT_MIN_GEOMETRY_POINTS,
+    max_plane_rms_error: float = DEFAULT_MAX_PLANE_RMS_ERROR,
+    vertical_normal_z_max: float = DEFAULT_VERTICAL_NORMAL_Z_MAX,
+) -> GeometryScore:
+    pts = np.asarray(points, dtype=np.float64)
+    if len(pts) < int(min_points):
+        return GeometryScore("low", "rejected_too_few_geometry_points", None, None, None, None, None)
+
+    try:
+        plane = fit_plane_least_squares(pts)
+    except ValueError:
+        return GeometryScore("low", "rejected_plane_fit_failed", None, None, None, None, None)
+
+    width_m, height_m = estimate_planar_extent(pts, plane.normal)
+    if plane.rms_error > float(max_plane_rms_error):
+        return GeometryScore(
+            "low",
+            "rejected_not_planar",
+            plane.point,
+            plane.normal,
+            width_m,
+            height_m,
+            plane.rms_error,
+        )
+
+    if abs(float(plane.normal[2])) > float(vertical_normal_z_max):
+        return GeometryScore(
+            "low",
+            "rejected_not_vertical_plane",
+            plane.point,
+            plane.normal,
+            width_m,
+            height_m,
+            plane.rms_error,
+        )
+
+    clean_label = str(label).lower()
+    limits = DIMENSION_LIMITS.get(clean_label)
+    if limits is not None:
+        min_w, max_w, min_h, max_h = limits
+        if not (min_w <= width_m <= max_w and min_h <= height_m <= max_h):
+            return GeometryScore(
+                "low",
+                f"rejected_implausible_{clean_label}_size",
+                plane.point,
+                plane.normal,
+                width_m,
+                height_m,
+                plane.rms_error,
+            )
+
+    accepted_label = clean_label if clean_label in DIMENSION_LIMITS else "object"
+    return GeometryScore(
+        "high",
+        f"accepted_vertical_{accepted_label}_geometry",
+        plane.point,
+        plane.normal,
+        width_m,
+        height_m,
+        plane.rms_error,
+    )
+
+
 def refine_detection_selection(
     points: np.ndarray,
     uv: np.ndarray,
@@ -147,6 +299,21 @@ def refine_detection_selection(
     coarse_count = int(coarse_mask.sum())
     confidence = "medium" if point_count >= int(min_refined_points) else "low"
     reason = "seed_component_depth_filtered" if confidence == "medium" else "too_few_refined_points"
+    plane_point = None
+    plane_normal = None
+    width_m = None
+    height_m = None
+    plane_rms_error = None
+
+    if point_count >= max(int(min_refined_points), DEFAULT_MIN_GEOMETRY_POINTS):
+        geometry = score_door_window_geometry(points_arr[depth_mask], str(det.get("label", "")))
+        confidence = geometry.confidence
+        reason = geometry.reason
+        plane_point = geometry.plane_point
+        plane_normal = geometry.plane_normal
+        width_m = geometry.width_m
+        height_m = geometry.height_m
+        plane_rms_error = geometry.plane_rms_error
 
     return RefinedDoorWindowSelection(
         detection_index=det_idx,
@@ -159,4 +326,9 @@ def refine_detection_selection(
         point_count=point_count,
         coarse_count=coarse_count,
         reason=reason,
+        plane_point=plane_point,
+        plane_normal=plane_normal,
+        width_m=width_m,
+        height_m=height_m,
+        plane_rms_error=plane_rms_error,
     )
