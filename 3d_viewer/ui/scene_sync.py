@@ -20,6 +20,8 @@ def configure_observer_scene(scene: SceneLike):
     scene.set_show_pc(True)
     scene.set_show_bboxes(False)
     scene.set_pick_mode(False)
+    if hasattr(scene, "set_global_view_mode"):
+        scene.set_global_view_mode(True)
 
 
 def set_scene_pair_point_size(primary: SceneLike, observer: SceneLike, size: float):

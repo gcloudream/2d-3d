@@ -26,18 +26,36 @@ class Camera:
 
     # ------- keyframe 切换 -------
 
-    def set_keyframe(self, position: np.ndarray, roll: float, pitch: float, yaw: float):
+    def set_keyframe(
+        self,
+        position: np.ndarray,
+        roll: float,
+        pitch: float,
+        yaw: float,
+        pano_yaw_offset_deg: float = -90.0,
+    ):
         """跳到新的全景采样点，自动把视角对齐到全景的"自然前方"。
 
-        当全景水平校准为 -90° 时，全景中心列对应 pano local +X 方向。
-        该方向在世界系中为 R_pano^T @ (1,0,0) = R_pano[0,:]，
-        对应的 viewer yaw = atan2(R[0,1], R[0,0])。
+        显示中心列对应的 pano local 方向由水平校准 offset 决定。
+        该方向转回世界系后，就是 reset_view 应该看的方向。
         """
         self.position = np.asarray(position, dtype=np.float64).copy()
-        R = rotation_from_angle(roll, pitch, yaw)
-        self._keyframe_yaw_deg = float(np.degrees(np.arctan2(R[0, 1], R[0, 0])))
+        self.update_keyframe_yaw_reference(roll, pitch, yaw, pano_yaw_offset_deg)
         self.yaw_deg = self._keyframe_yaw_deg
         self.pitch_deg = 0.0
+
+    def update_keyframe_yaw_reference(
+        self,
+        roll: float,
+        pitch: float,
+        yaw: float,
+        pano_yaw_offset_deg: float = -90.0,
+    ):
+        R = rotation_from_angle(roll, pitch, yaw)
+        off = np.deg2rad(float(pano_yaw_offset_deg))
+        local_center = np.array([-np.sin(off), np.cos(off), 0.0], dtype=np.float64)
+        world_center = R.T @ local_center
+        self._keyframe_yaw_deg = float(np.degrees(np.arctan2(world_center[1], world_center[0])))
 
     # ------- 鼠标交互 -------
 

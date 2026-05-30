@@ -32,6 +32,9 @@ class FakeScene:
     def set_pick_mode(self, on: bool):
         self.calls.append(("set_pick_mode", bool(on)))
 
+    def set_global_view_mode(self, on: bool):
+        self.calls.append(("set_global_view_mode", bool(on)))
+
     def set_point_size(self, size: float):
         self.calls.append(("set_point_size", float(size)))
 
@@ -50,6 +53,7 @@ class SceneSyncTest(unittest.TestCase):
             ("set_show_pc", True),
             ("set_show_bboxes", False),
             ("set_pick_mode", False),
+            ("set_global_view_mode", True),
         ])
 
     def test_set_scene_pair_point_size_updates_both_scenes(self):

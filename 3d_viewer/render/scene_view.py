@@ -20,6 +20,7 @@ from core.dataset import CameraPose
 from core.projection import rotation_from_angle
 from render.bbox_overlay import BboxOverlay
 from render.camera import Camera
+from render.orbit_camera import OrbitCamera
 from render.pano_sphere import PanoSphere
 from render.point_cloud import PointCloud
 from render.picking import find_nearest_to_mouse
@@ -90,6 +91,9 @@ class SceneView(QWidget):
     def set_selected_detection(self, idx: int):
         self.gl_window.set_selected_detection(idx)
 
+    def set_global_view_mode(self, on: bool):
+        self.gl_window.set_global_view_mode(on)
+
     def eventFilter(self, obj, event):
         if obj is self.container and event.type() == QEvent.KeyPress:
             if self.gl_window.handle_key(event.key()):
@@ -111,6 +115,8 @@ class _SceneGLWindow(QOpenGLWindow):
         self.setFormat(fmt)
 
         self.camera = Camera()
+        self.orbit_camera = OrbitCamera()
+        self._global_view_mode = False
         self._ctx: moderngl.Context | None = None
         self._pano: PanoSphere | None = None
         self._pc: PointCloud | None = None
@@ -143,6 +149,8 @@ class _SceneGLWindow(QOpenGLWindow):
             self._pending_points = (points, colors)
         else:
             self._pc.upload(points, colors)
+            if self._global_view_mode:
+                self.orbit_camera.fit_to_points(points)
             self.update()
 
     def set_keyframe(self, pose: CameraPose, image_path: Path):
@@ -152,7 +160,14 @@ class _SceneGLWindow(QOpenGLWindow):
         self._clear_hover()
         self._pano.load_image(image_path)
         self._pano.set_pose(pose.roll, pose.pitch, pose.yaw)
-        self.camera.set_keyframe(pose.position, pose.roll, pose.pitch, pose.yaw)
+        if not self._global_view_mode:
+            self.camera.set_keyframe(
+                pose.position,
+                pose.roll,
+                pose.pitch,
+                pose.yaw,
+                self._pano.yaw_offset_deg,
+            )
         self._current_pose = pose
         self._selected_detection = -1
         self._refresh_bbox_overlay()
@@ -174,14 +189,30 @@ class _SceneGLWindow(QOpenGLWindow):
     def set_pano_yaw_offset(self, degrees: float):
         if self._pano is not None:
             self._pano.set_yaw_offset(degrees)
+            if self._current_pose is not None and not self._global_view_mode:
+                self.camera.update_keyframe_yaw_reference(
+                    self._current_pose.roll,
+                    self._current_pose.pitch,
+                    self._current_pose.yaw,
+                    degrees,
+                )
             self._refresh_bbox_overlay()
             self.update()
 
     def reset_view(self):
-        self.camera.yaw_deg = self.camera._keyframe_yaw_deg
-        self.camera.pitch_deg = 0.0
-        self.camera.fov_deg = 75.0
+        if self._global_view_mode:
+            self.orbit_camera.reset_view()
+        else:
+            self.camera.yaw_deg = self.camera._keyframe_yaw_deg
+            self.camera.pitch_deg = 0.0
+            self.camera.fov_deg = 75.0
         self._clear_hover()
+        self.update()
+
+    def set_global_view_mode(self, on: bool):
+        self._global_view_mode = bool(on)
+        if self._global_view_mode and self._pc is not None and self._pc.points is not None:
+            self.orbit_camera.fit_to_points(self._pc.points)
         self.update()
 
     def set_highlight(self, idx: int):
@@ -251,12 +282,21 @@ class _SceneGLWindow(QOpenGLWindow):
 
         if self._pending_points is not None:
             self._pc.upload(*self._pending_points)
+            if self._global_view_mode:
+                self.orbit_camera.fit_to_points(self._pending_points[0])
             self._pending_points = None
         if self._pending_pose is not None:
             pose, img = self._pending_pose
             self._pano.load_image(img)
             self._pano.set_pose(pose.roll, pose.pitch, pose.yaw)
-            self.camera.set_keyframe(pose.position, pose.roll, pose.pitch, pose.yaw)
+            if not self._global_view_mode:
+                self.camera.set_keyframe(
+                    pose.position,
+                    pose.roll,
+                    pose.pitch,
+                    pose.yaw,
+                    self._pano.yaw_offset_deg,
+                )
             self._current_pose = pose
             self._pending_pose = None
         self._refresh_bbox_overlay()
@@ -274,16 +314,17 @@ class _SceneGLWindow(QOpenGLWindow):
         self._ctx.viewport = (0, 0, fb_w, fb_h)
         self._ctx.clear(0.07, 0.07, 0.09, 1.0)
 
-        proj = self.camera.proj_matrix(logical_w / logical_h)
-        view = self.camera.view_matrix()
+        active_camera = self.orbit_camera if self._global_view_mode else self.camera
+        proj = active_camera.proj_matrix(logical_w / logical_h)
+        view = active_camera.view_matrix()
         mvp = proj @ view
 
         if self._show_pano and self._pano is not None:
-            self._pano.render(mvp, self.camera.position)
+            self._pano.render(mvp, active_camera.position)
         if self._show_pc and self._pc is not None:
             self._pc.render(mvp)
         if self._show_bboxes and self._bbox_overlay is not None:
-            self._bbox_overlay.render(mvp, self.camera.position)
+            self._bbox_overlay.render(mvp, active_camera.position)
 
     def _logical_size(self) -> tuple[int, int]:
         return max(1, self.width()), max(1, self.height())
@@ -316,7 +357,8 @@ class _SceneGLWindow(QOpenGLWindow):
             dx = pos.x() - self._last_pos.x()
             dy = pos.y() - self._last_pos.y()
             self._last_pos = pos
-            self.camera.orbit(-dx * 0.2, -dy * 0.2)
+            active_camera = self.orbit_camera if self._global_view_mode else self.camera
+            active_camera.orbit(-dx * 0.2, -dy * 0.2)
             self._clear_hover()
             self.update()
             return
@@ -330,7 +372,11 @@ class _SceneGLWindow(QOpenGLWindow):
 
     def wheelEvent(self, e):
         delta = -e.angleDelta().y() / 120.0
-        self.camera.zoom(delta * 4.0)
+        active_camera = self.orbit_camera if self._global_view_mode else self.camera
+        if self._global_view_mode:
+            active_camera.zoom(delta)
+        else:
+            active_camera.zoom(delta * 4.0)
         self._clear_hover()
         self.update()
 
@@ -364,8 +410,9 @@ class _SceneGLWindow(QOpenGLWindow):
         if self._cursor_pos.x() < 0:
             return
         w, h = self._logical_size()
-        proj = self.camera.proj_matrix(w / h)
-        view = self.camera.view_matrix()
+        active_camera = self.orbit_camera if self._global_view_mode else self.camera
+        proj = active_camera.proj_matrix(w / h)
+        view = active_camera.view_matrix()
         mvp = (proj @ view).astype(np.float32)
         idx = find_nearest_to_mouse(
             self._pc.points, mvp, w, h,
@@ -390,8 +437,9 @@ class _SceneGLWindow(QOpenGLWindow):
         if self._pc is None or self._pc.points is None or self._pc.n == 0:
             return -1
         w, h = self._logical_size()
-        proj = self.camera.proj_matrix(w / h)
-        view = self.camera.view_matrix()
+        active_camera = self.orbit_camera if self._global_view_mode else self.camera
+        proj = active_camera.proj_matrix(w / h)
+        view = active_camera.view_matrix()
         mvp = (proj @ view).astype(np.float32)
         return find_nearest_to_mouse(
             self._pc.points, mvp, w, h,
