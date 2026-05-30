@@ -19,6 +19,11 @@ from core.door_window_refine import refine_detection_selection, should_highlight
 from core.projection import project_points_to_panorama, rotation_from_angle
 from render.scene_view import SceneView
 from ui.pano_annotation_editor import PanoAnnotationEditor
+from ui.scene_sync import (
+    configure_observer_scene,
+    set_scene_pair_highlight_mask,
+    set_scene_pair_point_size,
+)
 
 
 class DetectionWorker(QObject):
@@ -56,11 +61,16 @@ class MainWindow(QMainWindow):
         self.scene = SceneView()
         self.scene.hover_changed.connect(self._on_hover)
         self.scene.point_clicked.connect(self._on_point_clicked)
+        self.cloud_scene = SceneView()
         self.editor = PanoAnnotationEditor(self.workspace)
         self.editor.saved.connect(self._on_annotation_saved)
         self.editor.canceled.connect(self._exit_annotation_editor)
+        self.normal_view = QSplitter(Qt.Vertical)
+        self.normal_view.addWidget(self.scene)
+        self.normal_view.addWidget(self.cloud_scene)
+        self.normal_view.setSizes([680, 260])
         self.view_stack = QStackedWidget()
-        self.view_stack.addWidget(self.scene)
+        self.view_stack.addWidget(self.normal_view)
         self.view_stack.addWidget(self.editor)
 
         self.list = QListWidget()
@@ -100,7 +110,7 @@ class MainWindow(QMainWindow):
         self.size_slider.setMinimum(1)
         self.size_slider.setMaximum(8)
         self.size_slider.setValue(2)
-        self.size_slider.valueChanged.connect(lambda v: self.scene.set_point_size(float(v)))
+        self.size_slider.valueChanged.connect(self._set_point_size)
 
         self.yaw_offset = QComboBox()
         for label, value in [
@@ -183,7 +193,10 @@ class MainWindow(QMainWindow):
 
         d = self.dataset
         self.scene.set_world_points(d.points, d.colors)
+        self.cloud_scene.set_world_points(d.points, d.colors)
         self.scene.set_pano_yaw_offset(float(self.yaw_offset.currentData()))
+        self.cloud_scene.set_pano_yaw_offset(float(self.yaw_offset.currentData()))
+        configure_observer_scene(self.cloud_scene)
         self.list.blockSignals(True)
         self.list.clear()
         for p in d.poses:
@@ -214,7 +227,9 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "缺图", str(img))
             return
         self.scene.set_keyframe(pose, img)
-        self.scene.set_highlight_mask(None)
+        self.cloud_scene.set_keyframe(pose, img)
+        configure_observer_scene(self.cloud_scene)
+        self._set_highlight_mask(None)
         self.scene.set_selected_detection(-1)
         self._load_detections(pose)
         self.lbl_pose.setText(
@@ -243,6 +258,14 @@ class MainWindow(QMainWindow):
 
     def _on_yaw_offset(self):
         self.scene.set_pano_yaw_offset(float(self.yaw_offset.currentData()))
+        self.cloud_scene.set_pano_yaw_offset(float(self.yaw_offset.currentData()))
+        configure_observer_scene(self.cloud_scene)
+
+    def _set_point_size(self, value: int):
+        set_scene_pair_point_size(self.scene, self.cloud_scene, float(value))
+
+    def _set_highlight_mask(self, mask):
+        set_scene_pair_highlight_mask(self.scene, self.cloud_scene, mask)
 
     def _set_door_window_pick_mode(self, on: bool):
         self.scene.set_pick_mode(on)
@@ -280,7 +303,7 @@ class MainWindow(QMainWindow):
     def _on_detection_mode_changed(self):
         if not self.dataset or self.current_idx < 0:
             return
-        self.scene.set_highlight_mask(None)
+        self._set_highlight_mask(None)
         self.scene.set_selected_detection(-1)
         self._load_detections(self.dataset.poses[self.current_idx])
 
@@ -338,7 +361,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"手工框已保存: {Path(path_text).name}")
 
     def _exit_annotation_editor(self):
-        self.view_stack.setCurrentWidget(self.scene)
+        self.view_stack.setCurrentWidget(self.normal_view)
 
     def _on_detection_finished(self, path_text: str):
         if not self.dataset or self.current_idx < 0:
@@ -365,12 +388,12 @@ class MainWindow(QMainWindow):
             return
         if idx < 0:
             self.lbl_detection.setText("点击: 未吸附到点云点")
-            self.scene.set_highlight_mask(None)
+            self._set_highlight_mask(None)
             self.scene.set_selected_detection(-1)
             return
         if not self.current_detections:
             self.lbl_detection.setText("点击: 当前 keyframe 没有检测 JSON")
-            self.scene.set_highlight_mask(None)
+            self._set_highlight_mask(None)
             self.scene.set_selected_detection(-1)
             return
 
@@ -400,7 +423,7 @@ class MainWindow(QMainWindow):
             cam_pos=pose.position,
         )
         if selection.detection_index < 0:
-            self.scene.set_highlight_mask(None)
+            self._set_highlight_mask(None)
             self.scene.set_selected_detection(-1)
             self.lbl_detection.setText(
                 f"点击点 #{idx}\n未落入 door/window bbox\n"
@@ -409,7 +432,7 @@ class MainWindow(QMainWindow):
             )
             return
         highlight = selection.refined_mask if should_highlight_refined_selection(selection) else None
-        self.scene.set_highlight_mask(highlight)
+        self._set_highlight_mask(highlight)
         self.scene.set_selected_detection(selection.detection_index)
         score = f"{selection.score:.3f}" if selection.score is not None else "—"
         self.lbl_detection.setText(
