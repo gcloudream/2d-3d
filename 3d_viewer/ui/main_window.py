@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 from core.dataset import CameraPose, Dataset, find_default_dataset, load_dataset
 from core.detection_cache import find_detection_json
 from core.detection_runner import DETECTION_MODE_LABELS, run_detection_for_image
-from core.door_window import select_detection_region
+from core.door_window_refine import refine_detection_selection
 from core.projection import project_points_to_panorama, rotation_from_angle
 from render.scene_view import SceneView
 from ui.pano_annotation_editor import PanoAnnotationEditor
@@ -391,25 +391,32 @@ class MainWindow(QMainWindow):
             img_h,
             yaw_offset_deg=yaw_offset,
         )
-        selection = select_detection_region(
-            clicked_idx=idx,
+        selection = refine_detection_selection(
+            points=self.dataset.points,
             uv=uv,
+            clicked_idx=idx,
             detections=self.current_detections,
             pano_w=float(img_w),
+            cam_pos=pose.position,
         )
         if selection.detection_index < 0:
             self.scene.set_highlight_mask(None)
             self.scene.set_selected_detection(-1)
             self.lbl_detection.setText(
-                f"点击点 #{idx}\n未落入 door/window bbox\nuv: ({uv[idx,0]:.1f}, {uv[idx,1]:.1f})"
+                f"点击点 #{idx}\n未落入 door/window bbox\n"
+                f"reason: {selection.reason}\n"
+                f"uv: ({uv[idx,0]:.1f}, {uv[idx,1]:.1f})"
             )
             return
-        self.scene.set_highlight_mask(selection.mask)
+        highlight = selection.refined_mask if selection.point_count > 0 else selection.coarse_mask
+        self.scene.set_highlight_mask(highlight)
         self.scene.set_selected_detection(selection.detection_index)
         score = f"{selection.score:.3f}" if selection.score is not None else "—"
         self.lbl_detection.setText(
             f"命中 #{selection.detection_index} {selection.label} score={score}\n"
-            f"points: {selection.point_count:,}\n"
+            f"confidence: {selection.confidence}\n"
+            f"coarse: {selection.coarse_count:,} refined: {selection.point_count:,}\n"
+            f"reason: {selection.reason}\n"
             f"uv: ({uv[idx,0]:.1f}, {uv[idx,1]:.1f})"
         )
 
