@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 from core.dataset import CameraPose, Dataset, find_default_dataset, load_dataset
 from core.detection_cache import find_detection_json
 from core.detection_runner import DETECTION_MODE_LABELS, run_detection_for_image
-from core.door_window_refine import refine_detection_selection
+from core.door_window_refine import refine_detection_selection, should_highlight_refined_selection
 from core.projection import project_points_to_panorama, rotation_from_angle
 from render.scene_view import SceneView
 from ui.pano_annotation_editor import PanoAnnotationEditor
@@ -408,7 +408,7 @@ class MainWindow(QMainWindow):
                 f"uv: ({uv[idx,0]:.1f}, {uv[idx,1]:.1f})"
             )
             return
-        highlight = selection.refined_mask if selection.point_count > 0 else selection.coarse_mask
+        highlight = selection.refined_mask if should_highlight_refined_selection(selection) else None
         self.scene.set_highlight_mask(highlight)
         self.scene.set_selected_detection(selection.detection_index)
         score = f"{selection.score:.3f}" if selection.score is not None else "—"

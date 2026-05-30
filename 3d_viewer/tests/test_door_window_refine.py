@@ -15,6 +15,7 @@ from core.door_window_refine import (
     fit_plane_least_squares,
     refine_detection_selection,
     score_door_window_geometry,
+    should_highlight_refined_selection,
 )
 
 
@@ -182,6 +183,28 @@ class DoorWindowRefineTest(unittest.TestCase):
         self.assertEqual(score.confidence, "low")
         self.assertEqual(score.reason, "rejected_implausible_window_size")
 
+    def test_geometry_score_rejects_line_like_window_patch(self):
+        xs = np.linspace(-0.6, 0.6, 30)
+        points = np.array([[x, 0.0, 1.0 + (x + 0.6) * 0.75] for x in xs], dtype=np.float64)
+
+        score = score_door_window_geometry(points, "window")
+
+        self.assertEqual(score.confidence, "low")
+        self.assertEqual(score.reason, "rejected_low_rectangular_coverage")
+
+    def test_geometry_score_accepts_window_patch_with_sparse_outliers(self):
+        patch = _vertical_patch(width=1.2, height=0.9)
+        outliers = np.array(
+            [[x, 0.7, z] for x, z in zip(np.linspace(-0.6, 0.6, 8), np.linspace(1.0, 1.9, 8))],
+            dtype=np.float64,
+        )
+
+        score = score_door_window_geometry(np.vstack([patch, outliers]), "window")
+
+        self.assertEqual(score.confidence, "high")
+        self.assertEqual(score.reason, "accepted_vertical_window_geometry")
+        self.assertGreater(score.inlier_ratio, 0.7)
+
     def test_refine_selection_uses_geometry_reason_for_plausible_window(self):
         points = _vertical_patch(width=1.2, height=0.9)
         uv = np.array([[50.0 + p[0] * 10.0, 50.0 - p[2] * 10.0] for p in points], dtype=np.float64)
@@ -204,6 +227,26 @@ class DoorWindowRefineTest(unittest.TestCase):
         self.assertIsNotNone(selection.plane_normal)
         self.assertGreater(selection.width_m, 1.0)
         self.assertGreater(selection.height_m, 0.8)
+
+    def test_rejected_geometry_selection_should_not_use_normal_highlight(self):
+        points = np.array([[x, 0.0, 1.0 + (x + 0.6) * 0.75] for x in np.linspace(-0.6, 0.6, 30)])
+        uv = np.array([[50.0 + p[0] * 10.0, 50.0 - p[2] * 10.0] for p in points], dtype=np.float64)
+        detections = [{"label": "window", "score": 0.8, "bbox": [35.0, 20.0, 65.0, 45.0]}]
+
+        selection = refine_detection_selection(
+            points=points,
+            uv=uv,
+            clicked_idx=len(points) // 2,
+            detections=detections,
+            pano_w=100.0,
+            cam_pos=np.array([0.0, -3.0, 1.4], dtype=np.float64),
+            component_radius=0.35,
+            depth_delta=3.0,
+            min_refined_points=20,
+        )
+
+        self.assertEqual(selection.reason, "rejected_low_rectangular_coverage")
+        self.assertFalse(should_highlight_refined_selection(selection))
 
 
 if __name__ == "__main__":

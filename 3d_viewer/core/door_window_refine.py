@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Sequence
 
 import numpy as np
-from scipy.spatial import cKDTree
+from scipy.spatial import ConvexHull, QhullError, cKDTree
 
 from core.door_window import match_points_to_detections
 
@@ -17,6 +17,10 @@ DEFAULT_MIN_REFINED_POINTS = 80
 DEFAULT_MIN_GEOMETRY_POINTS = 20
 DEFAULT_MAX_PLANE_RMS_ERROR = 0.08
 DEFAULT_VERTICAL_NORMAL_Z_MAX = 0.35
+DEFAULT_PLANE_INLIER_THRESHOLD = 0.06
+DEFAULT_RANSAC_ITERATIONS = 120
+DEFAULT_MIN_PLANE_INLIER_RATIO = 0.45
+DEFAULT_MIN_RECTANGULAR_COVERAGE = 0.20
 
 DIMENSION_LIMITS = {
     "door": (0.5, 1.5, 1.6, 2.6),
@@ -29,6 +33,8 @@ class PlaneFit:
     point: np.ndarray
     normal: np.ndarray
     rms_error: float
+    inlier_mask: np.ndarray | None = None
+    inlier_ratio: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -40,6 +46,8 @@ class GeometryScore:
     width_m: float | None
     height_m: float | None
     plane_rms_error: float | None
+    inlier_ratio: float | None = None
+    rectangular_coverage: float | None = None
 
 
 @dataclass(frozen=True)
@@ -159,8 +167,68 @@ def fit_plane_least_squares(points: np.ndarray) -> PlaneFit:
     return PlaneFit(point=centroid, normal=normal, rms_error=rms_error)
 
 
-def estimate_planar_extent(points: np.ndarray, normal: np.ndarray) -> tuple[float, float]:
+def _plane_from_three_points(a: np.ndarray, b: np.ndarray, c: np.ndarray) -> tuple[np.ndarray, np.ndarray] | None:
+    normal = np.cross(b - a, c - a)
+    norm = float(np.linalg.norm(normal))
+    if norm < 1e-9:
+        return None
+    normal = normal / norm
+    if normal[2] < 0:
+        normal = -normal
+    return a, normal
+
+
+def fit_plane_ransac(
+    points: np.ndarray,
+    threshold: float = DEFAULT_PLANE_INLIER_THRESHOLD,
+    iterations: int = DEFAULT_RANSAC_ITERATIONS,
+) -> PlaneFit:
     pts = np.asarray(points, dtype=np.float64)
+    if pts.ndim != 2 or pts.shape[1] != 3:
+        raise ValueError("points must have shape (N, 3)")
+    n = len(pts)
+    if n < 3:
+        raise ValueError("at least 3 points are required to fit a plane")
+
+    rng = np.random.default_rng(0)
+    best_mask: np.ndarray | None = None
+    best_count = -1
+    best_rms = float("inf")
+
+    for _ in range(int(iterations)):
+        sample = rng.choice(n, size=3, replace=False)
+        candidate = _plane_from_three_points(pts[sample[0]], pts[sample[1]], pts[sample[2]])
+        if candidate is None:
+            continue
+        plane_point, normal = candidate
+        distances = np.abs((pts - plane_point.reshape(1, 3)) @ normal)
+        mask = distances <= float(threshold)
+        count = int(mask.sum())
+        if count < 3:
+            continue
+        rms = float(np.sqrt(np.mean(distances[mask] * distances[mask])))
+        if count > best_count or (count == best_count and rms < best_rms):
+            best_mask = mask
+            best_count = count
+            best_rms = rms
+
+    if best_mask is None:
+        raise ValueError("cannot fit a plane to degenerate points")
+
+    first_refit = fit_plane_least_squares(pts[best_mask])
+    distances = np.abs((pts - first_refit.point.reshape(1, 3)) @ first_refit.normal)
+    inlier_mask = distances <= float(threshold)
+    final_refit = fit_plane_least_squares(pts[inlier_mask])
+    return PlaneFit(
+        point=final_refit.point,
+        normal=final_refit.normal,
+        rms_error=final_refit.rms_error,
+        inlier_mask=inlier_mask,
+        inlier_ratio=float(inlier_mask.sum()) / float(n),
+    )
+
+
+def _plane_axes(normal: np.ndarray, points: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
     n = np.asarray(normal, dtype=np.float64).reshape(3)
     n_norm = float(np.linalg.norm(n))
     if n_norm == 0.0:
@@ -171,6 +239,9 @@ def estimate_planar_extent(points: np.ndarray, normal: np.ndarray) -> tuple[floa
     height_axis = z_axis - float(np.dot(z_axis, n)) * n
     height_norm = float(np.linalg.norm(height_axis))
     if height_norm < 1e-6:
+        if points is None:
+            raise ValueError("points are required when the plane is horizontal")
+        pts = np.asarray(points, dtype=np.float64)
         centered = pts - pts.mean(axis=0, keepdims=True)
         _, _, vh = np.linalg.svd(centered, full_matrices=False)
         axis_a = vh[0]
@@ -179,12 +250,36 @@ def estimate_planar_extent(points: np.ndarray, normal: np.ndarray) -> tuple[floa
         axis_b = height_axis / height_norm
         axis_a = np.cross(axis_b, n)
         axis_a = axis_a / float(np.linalg.norm(axis_a))
+    return axis_a, axis_b
 
-    coord_a = pts @ axis_a
-    coord_b = pts @ axis_b
+
+def _planar_coordinates(points: np.ndarray, normal: np.ndarray) -> np.ndarray:
+    pts = np.asarray(points, dtype=np.float64)
+    axis_a, axis_b = _plane_axes(normal, pts)
+    return np.column_stack([pts @ axis_a, pts @ axis_b])
+
+
+def estimate_planar_extent(points: np.ndarray, normal: np.ndarray) -> tuple[float, float]:
+    coords = _planar_coordinates(points, normal)
+    coord_a = coords[:, 0]
+    coord_b = coords[:, 1]
     width_m = float(coord_a.max() - coord_a.min())
     height_m = float(coord_b.max() - coord_b.min())
     return width_m, height_m
+
+
+def rectangular_coverage(points: np.ndarray, normal: np.ndarray) -> float:
+    coords = _planar_coordinates(points, normal)
+    width_m = float(coords[:, 0].max() - coords[:, 0].min())
+    height_m = float(coords[:, 1].max() - coords[:, 1].min())
+    bbox_area = width_m * height_m
+    if len(coords) < 3 or bbox_area <= 1e-9:
+        return 0.0
+    try:
+        hull = ConvexHull(coords)
+    except QhullError:
+        return 0.0
+    return float(hull.volume) / bbox_area
 
 
 def score_door_window_geometry(
@@ -193,17 +288,38 @@ def score_door_window_geometry(
     min_points: int = DEFAULT_MIN_GEOMETRY_POINTS,
     max_plane_rms_error: float = DEFAULT_MAX_PLANE_RMS_ERROR,
     vertical_normal_z_max: float = DEFAULT_VERTICAL_NORMAL_Z_MAX,
+    min_plane_inlier_ratio: float = DEFAULT_MIN_PLANE_INLIER_RATIO,
+    min_rectangular_coverage: float = DEFAULT_MIN_RECTANGULAR_COVERAGE,
 ) -> GeometryScore:
     pts = np.asarray(points, dtype=np.float64)
     if len(pts) < int(min_points):
         return GeometryScore("low", "rejected_too_few_geometry_points", None, None, None, None, None)
 
     try:
-        plane = fit_plane_least_squares(pts)
+        plane = fit_plane_ransac(pts)
     except ValueError:
-        return GeometryScore("low", "rejected_plane_fit_failed", None, None, None, None, None)
+        try:
+            plane = fit_plane_least_squares(pts)
+        except ValueError:
+            return GeometryScore("low", "rejected_plane_fit_failed", None, None, None, None, None)
 
-    width_m, height_m = estimate_planar_extent(pts, plane.normal)
+    inlier_mask = plane.inlier_mask if plane.inlier_mask is not None else np.ones(len(pts), dtype=bool)
+    inlier_points = pts[inlier_mask]
+    width_m, height_m = estimate_planar_extent(inlier_points, plane.normal)
+    coverage = rectangular_coverage(inlier_points, plane.normal)
+    if plane.inlier_ratio < float(min_plane_inlier_ratio):
+        return GeometryScore(
+            "low",
+            "rejected_low_plane_inlier_ratio",
+            plane.point,
+            plane.normal,
+            width_m,
+            height_m,
+            plane.rms_error,
+            plane.inlier_ratio,
+            coverage,
+        )
+
     if plane.rms_error > float(max_plane_rms_error):
         return GeometryScore(
             "low",
@@ -213,6 +329,8 @@ def score_door_window_geometry(
             width_m,
             height_m,
             plane.rms_error,
+            plane.inlier_ratio,
+            coverage,
         )
 
     if abs(float(plane.normal[2])) > float(vertical_normal_z_max):
@@ -224,6 +342,21 @@ def score_door_window_geometry(
             width_m,
             height_m,
             plane.rms_error,
+            plane.inlier_ratio,
+            coverage,
+        )
+
+    if coverage < float(min_rectangular_coverage):
+        return GeometryScore(
+            "low",
+            "rejected_low_rectangular_coverage",
+            plane.point,
+            plane.normal,
+            width_m,
+            height_m,
+            plane.rms_error,
+            plane.inlier_ratio,
+            coverage,
         )
 
     clean_label = str(label).lower()
@@ -239,6 +372,8 @@ def score_door_window_geometry(
                 width_m,
                 height_m,
                 plane.rms_error,
+                plane.inlier_ratio,
+                coverage,
             )
 
     accepted_label = clean_label if clean_label in DIMENSION_LIMITS else "object"
@@ -250,6 +385,14 @@ def score_door_window_geometry(
         width_m,
         height_m,
         plane.rms_error,
+        plane.inlier_ratio,
+        coverage,
+    )
+
+
+def should_highlight_refined_selection(selection: RefinedDoorWindowSelection) -> bool:
+    return selection.point_count > 0 and not (
+        selection.confidence == "low" and selection.reason.startswith("rejected_")
     )
 
 
