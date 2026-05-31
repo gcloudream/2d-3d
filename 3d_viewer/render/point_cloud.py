@@ -155,6 +155,14 @@ class PointCloud:
             self.selected_prog["point_size"].value = max(8.0, float(self.point_size) * 5.0)
             if not self.selected_depth_test:
                 self.ctx.disable(moderngl.DEPTH_TEST)
-            self.selected_vao.render(mode=moderngl.POINTS)
-            if not self.selected_depth_test:
+                self.selected_vao.render(mode=moderngl.POINTS)
                 self.ctx.enable(moderngl.DEPTH_TEST)
+            else:
+                # Selected points share coordinates with the regular cloud points
+                # already drawn, so their depths are equal. The default GL_LESS
+                # test rejects equal depth, hiding every selected point. Use
+                # GL_LEQUAL so a selected point passes over its own twin while
+                # still being occluded by genuinely closer geometry.
+                self.ctx.depth_func = "<="
+                self.selected_vao.render(mode=moderngl.POINTS)
+                self.ctx.depth_func = "<"

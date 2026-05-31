@@ -32,7 +32,9 @@ cd /Users/gengchen/Desktop/3dtiqu
 .venv/bin/python 3d_viewer/main.py
 ```
 
-默认从工作区里查找第一个含 `CAM/camera_pos.cam` 的目录。
+默认从工作区里查找第一个含 `CAM/camera_pos.cam` 的目录。如果数据目录含
+`CALIBRATION_CAMERA/CAMERA_PANO_*.yaml`，会自动使用全景相机外参修正
+SLAM 轨迹到真实全景相机中心，并把标定 yaw offset 设为默认水平校准。
 
 ## 操作
 
@@ -105,10 +107,13 @@ cd /Users/gengchen/Desktop/3dtiqu
 
 - 数据解析 / LAS 抽样思路沿用 `desktop_viewer/data.py`
 - `rotation_from_angle` 复刻 `算法例子/projectToPanoramic.py`，确保全景贴图和原始算法的坐标系一致
+- 当前室内扫描数据的 `CAM/camera_pos.cam` 与 `verts.txt` 轨迹一致，viewer 会结合
+  `CAMERA_PANO_*.yaml` 的 `extrinsicTrans` 将显示位置从机体/SLAM 中心修正到全景相机中心。
 - 旧的 `desktop_viewer/` 是 OpenGL 2.1 + 全景 overlay 范式（点云投到全景图上当像素），与本目录不重叠
 
 ## 坐标校准说明
 
-当前数据的点云和全景影像在水平平面存在稳定 90° 基准轴差异，UI 默认使用 `-90°` 全景水平校准。
+当前数据的点云和全景影像在水平平面存在约 90° 基准轴差异。若存在全景相机标定文件，
+UI 默认使用标定 yaw offset；否则回退到 `-90°` 全景水平校准。
 
 详见 [`PANORAMA_YAW_ALIGNMENT.md`](PANORAMA_YAW_ALIGNMENT.md)。

@@ -4,11 +4,15 @@
 """
 from __future__ import annotations
 
+import ast
 from dataclasses import dataclass
 from pathlib import Path
+import re
 
 import laspy
 import numpy as np
+
+from core.projection import rotation_from_angle
 
 
 @dataclass(frozen=True)
@@ -21,11 +25,26 @@ class CameraPose:
     pitch: float  # rad
     yaw: float    # rad
     timestamp: float | None = None
+    body_x: float | None = None
+    body_y: float | None = None
+    body_z: float | None = None
 
     @property
     def position(self) -> np.ndarray:
         return np.array([self.x, self.y, self.z], dtype=np.float64)
 
+    @property
+    def body_position(self) -> np.ndarray:
+        if self.body_x is None or self.body_y is None or self.body_z is None:
+            return self.position
+        return np.array([self.body_x, self.body_y, self.body_z], dtype=np.float64)
+
+
+@dataclass(frozen=True)
+class PanoCalibration:
+    translation: np.ndarray
+    angle: np.ndarray
+    default_yaw_offset_deg: float
 
 @dataclass
 class Dataset:
@@ -38,6 +57,8 @@ class Dataset:
     colors: np.ndarray              # (N, 3) uint8
     total_points: int               # 原始点数
     sample_step: int                # 抽样步长
+    pano_calibration: PanoCalibration | None = None
+    pano_yaw_offset_deg: float = -90.0
 
 
 def find_default_dataset(workspace: Path) -> "Dataset | None":
@@ -104,6 +125,66 @@ def parse_camera_file(camera_file: Path) -> list[CameraPose]:
     return unique
 
 
+def load_pano_calibration(data_root: Path) -> PanoCalibration | None:
+    """Load panorama camera extrinsics exported with the scan, if present."""
+    calib_dir = data_root / "CALIBRATION_CAMERA"
+    candidates = sorted(calib_dir.glob("CAMERA_PANO_*.yaml"))
+    if not candidates:
+        return None
+    text = candidates[0].read_text(encoding="utf-8")
+    translation = _parse_yaml_list(text, "extrinsicTrans")
+    angle = _parse_yaml_list(text, "extrinsicAngle")
+    if translation is None or angle is None:
+        return None
+    return PanoCalibration(
+        translation=np.asarray(translation, dtype=np.float64),
+        angle=np.asarray(angle, dtype=np.float64),
+        default_yaw_offset_deg=-float(np.degrees(angle[2])),
+    )
+
+
+def _parse_yaml_list(text: str, key: str) -> list[float] | None:
+    match = re.search(rf"^{re.escape(key)}:\s*(\[[^\]]+\])\s*$", text, re.MULTILINE)
+    if not match:
+        return None
+    value = ast.literal_eval(match.group(1))
+    if not isinstance(value, list) or len(value) < 3:
+        return None
+    return [float(v) for v in value[:3]]
+
+
+def apply_pano_calibration(
+    poses: list[CameraPose],
+    translation: np.ndarray,
+) -> list[CameraPose]:
+    """Move body/SLAM trajectory poses to the physical panorama camera center.
+
+    camera_pos.cam is exported from the optimized SLAM vertices in this dataset.
+    The panorama camera has a lever-arm offset stored in CALIBRATION_CAMERA; that
+    offset must be rotated from the body frame into world coordinates per pose.
+    """
+    t = np.asarray(translation, dtype=np.float64).reshape(3)
+    calibrated: list[CameraPose] = []
+    for p in poses:
+        body_pos = p.position
+        R_body = rotation_from_angle(p.roll, p.pitch, p.yaw)
+        cam_pos = body_pos + R_body.T @ t
+        calibrated.append(CameraPose(
+            image_name=p.image_name,
+            x=float(cam_pos[0]),
+            y=float(cam_pos[1]),
+            z=float(cam_pos[2]),
+            roll=p.roll,
+            pitch=p.pitch,
+            yaw=p.yaw,
+            timestamp=p.timestamp,
+            body_x=p.x,
+            body_y=p.y,
+            body_z=p.z,
+        ))
+    return calibrated
+
+
 def load_las_sample(las_file: Path, max_points: int = 300_000) -> tuple[np.ndarray, np.ndarray, int, int]:
     """读 LAS 抽样，返回 (points, colors, total_points, sample_step)。
 
@@ -140,6 +221,11 @@ def load_dataset(cfg: _Config, max_points: int = 300_000) -> Dataset:
     poses = parse_camera_file(cfg.camera_file)
     if not poses:
         raise RuntimeError(f"no poses parsed from {cfg.camera_file}")
+    pano_calibration = load_pano_calibration(cfg.data_root)
+    pano_yaw_offset_deg = -90.0
+    if pano_calibration is not None:
+        poses = apply_pano_calibration(poses, pano_calibration.translation)
+        pano_yaw_offset_deg = pano_calibration.default_yaw_offset_deg
     points, colors, total, step = load_las_sample(cfg.pointcloud_file, max_points)
     return Dataset(
         data_root=cfg.data_root,
@@ -149,4 +235,6 @@ def load_dataset(cfg: _Config, max_points: int = 300_000) -> Dataset:
         poses=poses,
         points=points, colors=colors,
         total_points=total, sample_step=step,
+        pano_calibration=pano_calibration,
+        pano_yaw_offset_deg=pano_yaw_offset_deg,
     )

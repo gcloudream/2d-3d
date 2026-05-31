@@ -68,7 +68,7 @@ def _draw_bbox(
 def main() -> int:
     ap = argparse.ArgumentParser(description="Validate point projection against detections")
     ap.add_argument("--detections", required=True, help="path to a 2d detection JSON file")
-    ap.add_argument("--offset", type=float, default=-90.0, help="yaw offset used for projection")
+    ap.add_argument("--offset", type=float, default=None, help="yaw offset used for projection")
     ap.add_argument("--max-points", type=int, default=120_000, help="LAS sample size")
     ap.add_argument("--draw-points", type=int, default=8_000, help="number of projected points to draw")
     ap.add_argument("--output", default=str(WORKSPACE / "out" / "door_window_match"))
@@ -85,13 +85,14 @@ def main() -> int:
     if cfg is None:
         raise RuntimeError(f"no dataset found under {WORKSPACE}")
     dataset = load_dataset(cfg, max_points=args.max_points)
+    offset = dataset.pano_yaw_offset_deg if args.offset is None else float(args.offset)
     pose = _find_pose_for_image(dataset.poses, image_path.name)
 
     image = Image.open(image_path).convert("RGB")
     img_w, img_h = image.size
     R = rotation_from_angle(pose.roll, pose.pitch, pose.yaw)
     uv = project_points_to_panorama(
-        dataset.points, pose.position, R, img_w, img_h, yaw_offset_deg=args.offset,
+        dataset.points, pose.position, R, img_w, img_h, yaw_offset_deg=offset,
     )
     result = match_points_to_detections(uv, detections, pano_w=float(img_w))
 
@@ -120,7 +121,7 @@ def main() -> int:
     draw.text((34, 30), image_path.name, fill=(255, 255, 255), font=font)
     draw.text(
         (34, 82),
-        f"yellow=bbox, cyan=projected points, red=points inside bbox, offset={args.offset:.1f} deg",
+        f"yellow=bbox, cyan=projected points, red=points inside bbox, offset={offset:.1f} deg",
         fill=(255, 255, 255),
         font=small_font,
     )

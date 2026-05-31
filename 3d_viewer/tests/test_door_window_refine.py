@@ -10,11 +10,18 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from core.door_window_refine import (
+    DEFAULT_PLANE_DISPLAY_THICKNESS,
+    clip_bbox_cone_by_seed_depth,
     connected_component_from_seed,
+    estimate_seed_plane,
+    filter_by_normal_consistency,
     filter_by_seed_depth,
+    filter_by_seed_plane,
     fit_plane_least_squares,
     refine_detection_selection,
+    remove_isolated_points,
     score_door_window_geometry,
+    select_plane_band,
     should_highlight_refined_selection,
 )
 
@@ -274,6 +281,166 @@ class DoorWindowRefineTest(unittest.TestCase):
 
         self.assertEqual(selection.reason, "rejected_low_rectangular_coverage")
         self.assertFalse(should_highlight_refined_selection(selection))
+
+    def test_select_plane_band_keeps_only_points_near_plane(self):
+        plane_point = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        plane_normal = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+        points = np.array([
+            [0.0, 0.00, 1.0],   # on plane
+            [0.5, 0.02, 1.5],   # 0.02 m off -> keep
+            [0.5, 0.09, 1.5],   # 0.09 m off -> drop
+            [-0.5, -0.30, 0.8],  # 0.30 m off -> drop
+        ], dtype=np.float64)
+
+        band = select_plane_band(points, plane_point, plane_normal, thickness=0.04)
+
+        self.assertEqual(band.tolist(), [True, True, False, False])
+
+    def test_clip_bbox_cone_removes_far_surface_behind_seed(self):
+        # A near door surface (~2 m) and a far wall (~5 m) share the same bbox
+        # cone; clipping around the near seed must drop the far wall.
+        points = np.array([
+            [0.0, 2.0, 0.0],   # seed surface
+            [0.1, 2.1, 0.2],   # near
+            [0.0, 5.0, 0.0],   # far wall
+            [0.1, 5.1, 0.2],   # far wall
+        ], dtype=np.float64)
+        candidate = np.array([True, True, True, True])
+        cam = np.zeros(3, dtype=np.float64)
+
+        clipped = clip_bbox_cone_by_seed_depth(
+            points, candidate, seed_idx=0, cam_pos=cam, depth_window=0.6,
+        )
+
+        self.assertEqual(clipped.tolist(), [True, True, False, False])
+
+    def test_filter_by_seed_plane_flattens_wall_halo(self):
+        # Door sheet at y=0 plus a halo 0.2 m behind it on the same wall: a
+        # camera-distance shell barely separates them, the plane filter does.
+        plane_point = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+        plane_normal = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+        points = np.array([
+            [0.0, 0.00, 1.0],   # seed, on plane
+            [0.4, 0.03, 1.4],   # on door
+            [0.4, 0.20, 1.4],   # halo behind door
+            [-0.4, 0.25, 0.7],  # halo
+        ], dtype=np.float64)
+        component = np.array([True, True, True, True])
+
+        mask = filter_by_seed_plane(
+            points, component, seed_idx=0,
+            plane_point=plane_point, plane_normal=plane_normal, max_delta=0.08,
+        )
+
+        self.assertEqual(mask.tolist(), [True, True, False, False])
+
+    def test_estimate_seed_plane_returns_horizontal_normal_for_vertical_wall(self):
+        patch = _vertical_patch(width=1.0, height=1.0, cols=6, rows=6)
+        mask = np.ones(len(patch), dtype=bool)
+
+        result = estimate_seed_plane(patch, mask, seed_idx=len(patch) // 2, radius=2.0)
+
+        self.assertIsNotNone(result)
+        _, normal = result
+        self.assertLess(abs(float(normal[2])), 0.05)
+
+    def test_filter_by_normal_consistency_drops_perpendicular_floor(self):
+        # Vertical door wall (normal ~ +y) connected to a horizontal floor
+        # (normal ~ +z). Region growth would include both; the normal filter
+        # must keep the wall and drop the floor.
+        wall = np.array(
+            [[x, 0.0, z] for z in np.linspace(1.0, 2.0, 8) for x in np.linspace(-0.4, 0.4, 8)],
+            dtype=np.float64,
+        )
+        floor = np.array(
+            [[x, y, 1.0] for y in np.linspace(0.05, 0.6, 8) for x in np.linspace(-0.4, 0.4, 8)],
+            dtype=np.float64,
+        )
+        points = np.vstack([wall, floor])
+        component = np.ones(len(points), dtype=bool)
+        ref_normal = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+
+        mask = filter_by_normal_consistency(
+            points, component, seed_idx=len(wall) // 2,
+            reference_normal=ref_normal, radius=0.3, max_angle_deg=35.0, min_neighbors=4,
+        )
+
+        # most wall points kept, most floor points dropped
+        self.assertGreater(mask[:len(wall)].mean(), 0.8)
+        self.assertLess(mask[len(wall):].mean(), 0.2)
+
+    def test_remove_isolated_points_drops_disconnected_stragglers(self):
+        # Dense body of points plus a few far-flung isolated stragglers.
+        body = np.array(
+            [[x, 0.0, z] for z in np.linspace(0.0, 0.3, 9) for x in np.linspace(0.0, 0.3, 9)],
+            dtype=np.float64,
+        )
+        stragglers = np.array([[3.0, 0.0, 3.0], [-2.5, 0.0, 2.0], [4.0, 0.0, -1.0]], dtype=np.float64)
+        points = np.vstack([body, stragglers])
+        mask = np.ones(len(points), dtype=bool)
+
+        kept = remove_isolated_points(points, mask, radius=0.1, min_neighbors=4)
+
+        self.assertGreater(kept[: len(body)].mean(), 0.9)  # body retained
+        self.assertFalse(kept[len(body):].any())           # stragglers removed
+
+    def test_remove_isolated_points_keeps_seed_even_if_isolated(self):
+        body = np.array(
+            [[x, 0.0, z] for z in np.linspace(0.0, 0.3, 9) for x in np.linspace(0.0, 0.3, 9)],
+            dtype=np.float64,
+        )
+        lone = np.array([[5.0, 0.0, 5.0]], dtype=np.float64)
+        points = np.vstack([body, lone])
+        mask = np.ones(len(points), dtype=bool)
+        seed = len(points) - 1  # the lone point
+
+        kept = remove_isolated_points(points, mask, seed_idx=seed, radius=0.1, min_neighbors=4)
+
+        self.assertTrue(kept[seed])  # seed protected from removal
+
+    def test_remove_isolated_points_returns_small_selection_unchanged(self):
+        points = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]], dtype=np.float64)
+        mask = np.array([True, True, True])
+
+        kept = remove_isolated_points(points, mask, radius=0.1, min_neighbors=4)
+
+        # too few points to judge density -> unchanged
+        self.assertEqual(kept.tolist(), [True, True, True])
+
+    def test_refine_selection_thins_accepted_set_to_plane_band(self):
+        # A clean vertical door plane (dense) plus a sparse parallel "halo" sheet
+        # 0.055 m behind it (e.g. the wall the door is flush against). The halo is
+        # inside the RANSAC inlier band (0.06 m) so it survives plane fitting, but
+        # the displayed highlight must be thinned to the display band (0.04 m) so
+        # it does not fan out in the oblique global view.
+        patch = _vertical_patch(width=0.9, height=2.0, cols=8, rows=10)
+        halo = patch[::7] + np.array([0.0, 0.055, 0.0])
+        points = np.vstack([patch, halo])
+        uv = np.array([[50.0 + p[0] * 10.0, 50.0 - p[2] * 10.0] for p in points], dtype=np.float64)
+        detections = [{"label": "door", "score": 0.9, "bbox": [20.0, 0.0, 80.0, 60.0]}]
+
+        selection = refine_detection_selection(
+            points=points,
+            uv=uv,
+            clicked_idx=len(patch) // 2,
+            detections=detections,
+            pano_w=100.0,
+            cam_pos=np.array([0.0, -3.0, 1.4], dtype=np.float64),
+            component_radius=1.0,
+            depth_delta=3.0,
+            min_refined_points=20,
+        )
+
+        self.assertEqual(selection.confidence, "high")
+        highlighted = points[selection.refined_mask]
+        plane_offsets = np.abs(
+            (highlighted - selection.plane_point.reshape(1, 3)) @ selection.plane_normal
+        )
+        # Every highlighted point sits within the display band of the plane.
+        self.assertTrue(np.all(plane_offsets <= DEFAULT_PLANE_DISPLAY_THICKNESS + 1e-9))
+        # The sparse 0.05 m halo sheet is excluded, so the highlight is one sheet.
+        self.assertLess(selection.point_count, len(points))
+        self.assertEqual(selection.point_count, len(patch))
 
 
 if __name__ == "__main__":

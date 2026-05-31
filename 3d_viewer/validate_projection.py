@@ -69,7 +69,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Generate panorama projection validation image")
     ap.add_argument("--keyframe", type=int, default=0, help="keyframe index to inspect")
     ap.add_argument("--points", type=int, default=12, help="number of sampled point-cloud points")
-    ap.add_argument("--offset", type=float, default=-90.0, help="comparison yaw offset in degrees")
+    ap.add_argument("--offset", type=float, default=None, help="comparison yaw offset in degrees")
     ap.add_argument("--max-points", type=int, default=80_000, help="LAS sample size for this check")
     ap.add_argument("--output", default=str(WORKSPACE / "out" / "projection_validation"))
     args = ap.parse_args()
@@ -78,6 +78,7 @@ def main() -> int:
     if cfg is None:
         raise RuntimeError(f"no dataset found under {WORKSPACE}")
     dataset = load_dataset(cfg, max_points=args.max_points)
+    offset = dataset.pano_yaw_offset_deg if args.offset is None else float(args.offset)
     if not dataset.poses:
         raise RuntimeError("dataset has no poses")
 
@@ -90,7 +91,7 @@ def main() -> int:
     sample_idx = _pick_sample_points(dataset.points, pose.position, args.points)
     sample_points = dataset.points[sample_idx]
     raw_uv = project_points_to_panorama(sample_points, pose.position, R, img_w, img_h, 0.0)
-    offset_uv = project_points_to_panorama(sample_points, pose.position, R, img_w, img_h, args.offset)
+    offset_uv = project_points_to_panorama(sample_points, pose.position, R, img_w, img_h, offset)
 
     vis = image.copy()
     draw = ImageDraw.Draw(vis)
@@ -98,7 +99,7 @@ def main() -> int:
     small_font = _load_font(24)
     draw.rectangle((18, 18, 880, 138), fill=(0, 0, 0))
     draw.text((34, 30), f"{pose.image_name}", fill=(255, 255, 255), font=font)
-    draw.text((34, 82), "red=raw 0 deg, cyan=offset %.1f deg" % args.offset,
+    draw.text((34, 82), "red=raw 0 deg, cyan=offset %.1f deg" % offset,
               fill=(255, 255, 255), font=small_font)
 
     for n, (raw, shifted) in enumerate(zip(raw_uv, offset_uv), 1):

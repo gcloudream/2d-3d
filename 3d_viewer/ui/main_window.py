@@ -16,6 +16,11 @@ from core.dataset import CameraPose, Dataset, find_default_dataset, load_dataset
 from core.detection_cache import find_detection_json
 from core.detection_runner import DETECTION_MODE_LABELS, run_detection_for_image
 from core.door_window_refine import refine_detection_selection, should_highlight_refined_selection
+from core.door_window_fusion import fuse_detection_and_pointcloud, should_highlight_fused
+from core.pointcloud_extract import (
+    extract_planar_region_from_seed,
+    should_highlight_planar_region,
+)
 from core.projection import project_points_to_panorama, rotation_from_angle
 from render.scene_view import SceneView
 from ui.pano_annotation_editor import PanoAnnotationEditor
@@ -57,11 +62,15 @@ class MainWindow(QMainWindow):
         self.current_image_size: tuple[int, int] | None = None
         self._det_thread: QThread | None = None
         self._det_worker: DetectionWorker | None = None
+        # Accumulated door/window highlight, so 补充 (supplement) clicks can add
+        # disconnected sub-regions a single seed could not reach.
+        self._highlight_mask: np.ndarray | None = None
 
         self.scene = SceneView()
         self.scene.hover_changed.connect(self._on_hover)
         self.scene.point_clicked.connect(self._on_point_clicked)
         self.cloud_scene = SceneView()
+        self.cloud_scene.point_clicked.connect(self._on_cloud_point_clicked)
         self.editor = PanoAnnotationEditor(self.workspace)
         self.editor.saved.connect(self._on_annotation_saved)
         self.editor.canceled.connect(self._exit_annotation_editor)
@@ -90,6 +99,19 @@ class MainWindow(QMainWindow):
         self.cb_pick_dw = QCheckBox("门窗选择")
         self.cb_pick_dw.setChecked(False)
         self.cb_pick_dw.toggled.connect(self._set_door_window_pick_mode)
+
+        self.cb_pick_pc = QCheckBox("点云门窗提取")
+        self.cb_pick_pc.setChecked(False)
+        self.cb_pick_pc.toggled.connect(self._set_pointcloud_pick_mode)
+
+        self.cb_supplement = QCheckBox("补充模式 (累加高亮)")
+        self.cb_supplement.setChecked(False)
+        self.cb_supplement.setToolTip(
+            "开启后，点击新点会把提取结果并入已有高亮，用于补全单次点击漏掉的门窗子区域"
+        )
+
+        self.btn_clear_highlight = QPushButton("清除高亮")
+        self.btn_clear_highlight.clicked.connect(self._clear_highlight)
 
         self.cb_show_bboxes = QCheckBox("显示检测框")
         self.cb_show_bboxes.setChecked(True)
@@ -154,6 +176,9 @@ class MainWindow(QMainWindow):
         v.addWidget(self.btn_toggle_pano)
         v.addWidget(self.cb_pc)
         v.addWidget(self.cb_pick_dw)
+        v.addWidget(self.cb_pick_pc)
+        v.addWidget(self.cb_supplement)
+        v.addWidget(self.btn_clear_highlight)
         v.addWidget(self.cb_show_bboxes)
         v.addWidget(QLabel("检测模式"))
         v.addWidget(self.det_mode)
@@ -192,11 +217,12 @@ class MainWindow(QMainWindow):
             return
 
         d = self.dataset
+        self._set_yaw_offset_value(d.pano_yaw_offset_deg)
         self.scene.set_world_points(d.points, d.colors)
         self.cloud_scene.set_world_points(d.points, d.colors)
         self.scene.set_pano_yaw_offset(float(self.yaw_offset.currentData()))
         self.cloud_scene.set_pano_yaw_offset(float(self.yaw_offset.currentData()))
-        configure_observer_scene(self.cloud_scene)
+        self._configure_observer_scene()
         self.list.blockSignals(True)
         self.list.clear()
         for p in d.poses:
@@ -228,7 +254,7 @@ class MainWindow(QMainWindow):
             return
         self.scene.set_keyframe(pose, img)
         self.cloud_scene.set_keyframe(pose, img)
-        configure_observer_scene(self.cloud_scene)
+        self._configure_observer_scene()
         self._set_highlight_mask(None)
         self.scene.set_selected_detection(-1)
         self._load_detections(pose)
@@ -259,17 +285,152 @@ class MainWindow(QMainWindow):
     def _on_yaw_offset(self):
         self.scene.set_pano_yaw_offset(float(self.yaw_offset.currentData()))
         self.cloud_scene.set_pano_yaw_offset(float(self.yaw_offset.currentData()))
+        self._configure_observer_scene()
+
+    def _configure_observer_scene(self):
+        # configure_observer_scene turns off pick mode; re-apply the pure
+        # point-cloud extraction toggle so the bottom view stays clickable.
         configure_observer_scene(self.cloud_scene)
+        self.cloud_scene.set_pick_mode(self.cb_pick_pc.isChecked())
 
     def _set_point_size(self, value: int):
         set_scene_pair_point_size(self.scene, self.cloud_scene, float(value))
 
     def _set_highlight_mask(self, mask):
-        set_scene_pair_highlight_mask(self.scene, self.cloud_scene, mask)
+        self._highlight_mask = None if mask is None else np.asarray(mask, dtype=bool).copy()
+        set_scene_pair_highlight_mask(self.scene, self.cloud_scene, self._highlight_mask)
+
+    def _apply_extraction_highlight(self, new_mask):
+        """Set or accumulate the extraction highlight depending on 补充 mode.
+
+        In supplement mode a new extraction is unioned into the existing
+        highlight so disconnected door/window sub-regions a single seed could
+        not reach can be added click by click. Otherwise it replaces.
+        """
+        if new_mask is None:
+            if not self.cb_supplement.isChecked():
+                self._set_highlight_mask(None)
+            return
+        new_mask = np.asarray(new_mask, dtype=bool)
+        if self.cb_supplement.isChecked() and self._highlight_mask is not None:
+            if len(self._highlight_mask) == len(new_mask):
+                new_mask = self._highlight_mask | new_mask
+        self._set_highlight_mask(new_mask)
+
+    def _clear_highlight(self):
+        self._set_highlight_mask(None)
+        self.scene.set_selected_detection(-1)
+        self.statusBar().showMessage("已清除高亮")
+
+    def _set_yaw_offset_value(self, degrees: float):
+        degrees = float(degrees)
+        for i in range(self.yaw_offset.count()):
+            if abs(float(self.yaw_offset.itemData(i)) - degrees) < 1e-6:
+                self.yaw_offset.setCurrentIndex(i)
+                return
+        self.yaw_offset.insertItem(0, f"标定 {degrees:+.1f}°", degrees)
+        self.yaw_offset.setCurrentIndex(0)
 
     def _set_door_window_pick_mode(self, on: bool):
+        if on and self.cb_pick_pc.isChecked():
+            # The two pick modes are mutually exclusive; turning one on clears
+            # the other so a top-view click has one unambiguous behavior.
+            self.cb_pick_pc.setChecked(False)
         self.scene.set_pick_mode(on)
         self.statusBar().showMessage("门窗选择模式：点击点云点" if on else "导航模式")
+
+    def _set_pointcloud_pick_mode(self, on: bool):
+        if on and self.cb_pick_dw.isChecked():
+            self.cb_pick_dw.setChecked(False)
+        # Pure/fused point-cloud extraction works from BOTH views: enable pick
+        # on the top keyframe view and the bottom global view together.
+        self.scene.set_pick_mode(on)
+        self.cloud_scene.set_pick_mode(on)
+        self._set_highlight_mask(None)
+        self.statusBar().showMessage(
+            "点云门窗提取模式：在上方或下方点云中点击门/窗上的点" if on else "导航模式"
+        )
+
+    def _on_cloud_point_clicked(self, idx: int):
+        self._run_pointcloud_extraction(idx)
+
+    def _run_pointcloud_extraction(self, idx: int):
+        """Fusion-first door/window extraction from a clicked seed.
+
+        Shared by the top (keyframe) and bottom (global) views: a click in
+        either pane addresses the same shared world points, so the highlight
+        is identical regardless of which view was clicked. In 补充 (supplement)
+        mode the new region is unioned into the existing highlight.
+        """
+        if not self.dataset:
+            return
+        if idx < 0:
+            self.lbl_detection.setText("点云提取: 未吸附到点云点")
+            self._apply_extraction_highlight(None)
+            return
+
+        supplement = self.cb_supplement.isChecked()
+        prefix = "补充" if (supplement and self._highlight_mask is not None) else "融合提取"
+
+        # Strategy A: if the current keyframe has detections and the clicked
+        # seed falls inside one of their frustums, fuse the 2D box constraint
+        # with the pure point-cloud geometry. Otherwise fall back to the
+        # unconstrained pure-point-cloud extraction.
+        fused = self._try_fused_extraction(idx)
+        if fused is not None and fused.source == "fused":
+            highlight = fused.mask if should_highlight_fused(fused) else None
+            self._apply_extraction_highlight(highlight)
+            self.scene.set_selected_detection(fused.detection_index)
+            width = f"{fused.width_m:.2f}" if fused.width_m is not None else "—"
+            height = f"{fused.height_m:.2f}" if fused.height_m is not None else "—"
+            score = f"{fused.score:.3f}" if fused.score is not None else "—"
+            total = int(self._highlight_mask.sum()) if self._highlight_mask is not None else fused.point_count
+            self.lbl_detection.setText(
+                f"{prefix} #{idx} (框#{fused.detection_index} score={score})\n"
+                f"label: {fused.label} · confidence: {fused.confidence}\n"
+                f"this: {fused.point_count:,} · total: {total:,}\n"
+                f"size: {width} × {height} m\n"
+                f"reason: {fused.reason}"
+            )
+            return
+
+        selection = extract_planar_region_from_seed(self.dataset.points, idx)
+        highlight = selection.mask if should_highlight_planar_region(selection) else None
+        self._apply_extraction_highlight(highlight)
+        if not supplement:
+            self.scene.set_selected_detection(-1)
+        width = f"{selection.width_m:.2f}" if selection.width_m is not None else "—"
+        height = f"{selection.height_m:.2f}" if selection.height_m is not None else "—"
+        total = int(self._highlight_mask.sum()) if self._highlight_mask is not None else selection.point_count
+        pure_prefix = "补充" if (supplement and self._highlight_mask is not None) else "点云提取"
+        self.lbl_detection.setText(
+            f"{pure_prefix} #{idx} (纯点云)\n"
+            f"label: {selection.label} · confidence: {selection.confidence}\n"
+            f"this: {selection.point_count:,} · total: {total:,}\n"
+            f"size: {width} × {height} m\n"
+            f"reason: {selection.reason}"
+        )
+
+    def _try_fused_extraction(self, idx: int):
+        """Run frustum-fused extraction for the current keyframe, or None."""
+        if self.current_idx < 0 or not self.current_detections:
+            return None
+        pose = self.dataset.poses[self.current_idx]
+        img_w, img_h = self.current_image_size or (0, 0)
+        if img_w <= 0 or img_h <= 0:
+            return None
+        R = rotation_from_angle(pose.roll, pose.pitch, pose.yaw)
+        yaw_offset = float(self.yaw_offset.currentData())
+        return fuse_detection_and_pointcloud(
+            self.dataset.points,
+            idx,
+            self.current_detections,
+            pose.position,
+            R,
+            img_w,
+            img_h,
+            yaw_offset_deg=yaw_offset,
+        )
 
     def _load_detections(self, pose: CameraPose):
         self.current_detections = []
@@ -385,6 +546,11 @@ class MainWindow(QMainWindow):
 
     def _on_point_clicked(self, idx: int):
         if not self.dataset or self.current_idx < 0:
+            return
+        # When the point-cloud extraction mode is active, a top-view click runs
+        # the same fusion-first extraction as the bottom view.
+        if self.cb_pick_pc.isChecked():
+            self._run_pointcloud_extraction(idx)
             return
         if idx < 0:
             self.lbl_detection.setText("点击: 未吸附到点云点")
