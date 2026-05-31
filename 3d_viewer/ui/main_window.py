@@ -328,11 +328,13 @@ class MainWindow(QMainWindow):
     def _set_pointcloud_pick_mode(self, on: bool):
         # Pure/fused point-cloud extraction works from BOTH views: enable pick
         # on the top keyframe view and the bottom global view together.
+        # Toggling the mode keeps the current highlight so the user can turn
+        # picking off, orbit to a better angle, then turn it back on and keep
+        # supplementing. Use 清除高亮 to explicitly reset.
         self.scene.set_pick_mode(on)
         self.cloud_scene.set_pick_mode(on)
-        self._set_highlight_mask(None)
         self.statusBar().showMessage(
-            "点云门窗提取模式：在上方或下方点云中点击门/窗上的点" if on else "导航模式"
+            "点云门窗提取模式：在上方或下方点云中点击门/窗上的点" if on else "导航模式（高亮保留）"
         )
 
     def _on_cloud_point_clicked(self, idx: int):
