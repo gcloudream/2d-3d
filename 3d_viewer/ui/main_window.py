@@ -15,13 +15,12 @@ from PySide6.QtWidgets import (
 from core.dataset import CameraPose, Dataset, find_default_dataset, load_dataset
 from core.detection_cache import find_detection_json
 from core.detection_runner import DETECTION_MODE_LABELS, run_detection_for_image
-from core.door_window_refine import refine_detection_selection, should_highlight_refined_selection
 from core.door_window_fusion import fuse_detection_and_pointcloud, should_highlight_fused
 from core.pointcloud_extract import (
     extract_planar_region_from_seed,
     should_highlight_planar_region,
 )
-from core.projection import project_points_to_panorama, rotation_from_angle
+from core.projection import rotation_from_angle
 from render.scene_view import SceneView
 from ui.pano_annotation_editor import PanoAnnotationEditor
 from ui.scene_sync import (
@@ -95,10 +94,6 @@ class MainWindow(QMainWindow):
         self.cb_pc = QCheckBox("显示点云")
         self.cb_pc.setChecked(True)
         self.cb_pc.toggled.connect(self.scene.set_show_pc)
-
-        self.cb_pick_dw = QCheckBox("门窗选择")
-        self.cb_pick_dw.setChecked(False)
-        self.cb_pick_dw.toggled.connect(self._set_door_window_pick_mode)
 
         self.cb_pick_pc = QCheckBox("点云门窗提取")
         self.cb_pick_pc.setChecked(False)
@@ -175,7 +170,6 @@ class MainWindow(QMainWindow):
         v.addWidget(self.cb_pano)
         v.addWidget(self.btn_toggle_pano)
         v.addWidget(self.cb_pc)
-        v.addWidget(self.cb_pick_dw)
         v.addWidget(self.cb_pick_pc)
         v.addWidget(self.cb_supplement)
         v.addWidget(self.btn_clear_highlight)
@@ -331,17 +325,7 @@ class MainWindow(QMainWindow):
         self.yaw_offset.insertItem(0, f"标定 {degrees:+.1f}°", degrees)
         self.yaw_offset.setCurrentIndex(0)
 
-    def _set_door_window_pick_mode(self, on: bool):
-        if on and self.cb_pick_pc.isChecked():
-            # The two pick modes are mutually exclusive; turning one on clears
-            # the other so a top-view click has one unambiguous behavior.
-            self.cb_pick_pc.setChecked(False)
-        self.scene.set_pick_mode(on)
-        self.statusBar().showMessage("门窗选择模式：点击点云点" if on else "导航模式")
-
     def _set_pointcloud_pick_mode(self, on: bool):
-        if on and self.cb_pick_dw.isChecked():
-            self.cb_pick_dw.setChecked(False)
         # Pure/fused point-cloud extraction works from BOTH views: enable pick
         # on the top keyframe view and the bottom global view together.
         self.scene.set_pick_mode(on)
@@ -547,67 +531,9 @@ class MainWindow(QMainWindow):
     def _on_point_clicked(self, idx: int):
         if not self.dataset or self.current_idx < 0:
             return
-        # When the point-cloud extraction mode is active, a top-view click runs
-        # the same fusion-first extraction as the bottom view.
-        if self.cb_pick_pc.isChecked():
-            self._run_pointcloud_extraction(idx)
-            return
-        if idx < 0:
-            self.lbl_detection.setText("点击: 未吸附到点云点")
-            self._set_highlight_mask(None)
-            self.scene.set_selected_detection(-1)
-            return
-        if not self.current_detections:
-            self.lbl_detection.setText("点击: 当前 keyframe 没有检测 JSON")
-            self._set_highlight_mask(None)
-            self.scene.set_selected_detection(-1)
-            return
-
-        pose = self.dataset.poses[self.current_idx]
-        img_w, img_h = self.current_image_size or (0, 0)
-        if img_w <= 0 or img_h <= 0:
-            image_path = self.dataset.image_dir / pose.image_name
-            from PIL import Image
-            with Image.open(image_path) as img:
-                img_w, img_h = img.size
-        R = rotation_from_angle(pose.roll, pose.pitch, pose.yaw)
-        yaw_offset = float(self.yaw_offset.currentData())
-        uv = project_points_to_panorama(
-            self.dataset.points,
-            pose.position,
-            R,
-            img_w,
-            img_h,
-            yaw_offset_deg=yaw_offset,
-        )
-        selection = refine_detection_selection(
-            points=self.dataset.points,
-            uv=uv,
-            clicked_idx=idx,
-            detections=self.current_detections,
-            pano_w=float(img_w),
-            cam_pos=pose.position,
-        )
-        if selection.detection_index < 0:
-            self._set_highlight_mask(None)
-            self.scene.set_selected_detection(-1)
-            self.lbl_detection.setText(
-                f"点击点 #{idx}\n未落入 door/window bbox\n"
-                f"reason: {selection.reason}\n"
-                f"uv: ({uv[idx,0]:.1f}, {uv[idx,1]:.1f})"
-            )
-            return
-        highlight = selection.refined_mask if should_highlight_refined_selection(selection) else None
-        self._set_highlight_mask(highlight)
-        self.scene.set_selected_detection(selection.detection_index)
-        score = f"{selection.score:.3f}" if selection.score is not None else "—"
-        self.lbl_detection.setText(
-            f"命中 #{selection.detection_index} {selection.label} score={score}\n"
-            f"confidence: {selection.confidence}\n"
-            f"coarse: {selection.coarse_count:,} refined: {selection.point_count:,}\n"
-            f"reason: {selection.reason}\n"
-            f"uv: ({uv[idx,0]:.1f}, {uv[idx,1]:.1f})"
-        )
+        # The top keyframe view is only clickable in point-cloud extraction mode;
+        # a click runs the same fusion-first extraction as the bottom view.
+        self._run_pointcloud_extraction(idx)
 
     # 全屏快捷键转给 scene
     def keyPressEvent(self, e):
