@@ -18,7 +18,7 @@ from core.wall_image import (
     preserve_wall_density_grid,
     wall_image_output_dir,
 )
-from core.wall_openings import WallOpening
+from core.wall_openings import WallOpening, append_wall_opening_event
 
 
 DEFAULT_WALL_THICKNESS_M = 0.14
@@ -209,6 +209,21 @@ def generate_wall_model(
         segments,
     )
     projected_openings = _projected_openings_from_unmatched(opening_records, unmatched_openings)
+    if opening_records:
+        append_wall_opening_event(
+            workspace,
+            data_root,
+            {
+                "event": "generate_wall_model_opening_match",
+                "segment_count": len(segments),
+                "matched_opening_count": len(opening_markers),
+                "projected_opening_count": len(projected_openings),
+                "unmatched_opening_count": len(unmatched_openings),
+                "matched_openings": [marker.__dict__ for marker in opening_markers],
+                "projected_opening_ids": [opening.id for opening in projected_openings],
+                "unmatched_openings": unmatched_openings,
+            },
+        )
 
     out_dir = wall_model_output_dir(workspace)
     out_dir.mkdir(parents=True, exist_ok=True)

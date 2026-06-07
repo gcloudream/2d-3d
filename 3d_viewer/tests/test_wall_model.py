@@ -11,6 +11,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from core.wall_openings import wall_opening_events_path
 from core.wall_model import (
     WallSegment,
     complete_boundary_corner_gaps,
@@ -678,6 +679,17 @@ class WallModelTest(unittest.TestCase):
             self.assertEqual(result.projected_opening_count, 1)
             self.assertEqual(payload["projected_openings"][0]["id"], "window-0001")
             self.assertEqual(payload["opening_markers"], [])
+
+            events = [
+                json.loads(line)
+                for line in wall_opening_events_path(workspace, data_root).read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(events[-1]["event"], "generate_wall_model_opening_match")
+            self.assertEqual(events[-1]["matched_opening_count"], 0)
+            self.assertEqual(events[-1]["projected_opening_count"], 1)
+            self.assertEqual(events[-1]["unmatched_opening_count"], 1)
+            self.assertEqual(events[-1]["unmatched_openings"][0]["id"], "window-0001")
 
 
 if __name__ == "__main__":

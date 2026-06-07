@@ -21,7 +21,7 @@ from core.pointcloud_extract import (
     should_highlight_planar_region,
 )
 from core.projection import rotation_from_angle
-from core.wall_openings import append_wall_opening, opening_from_selection
+from core.wall_openings import append_wall_opening, append_wall_opening_event, opening_from_selection
 from render.scene_view import SceneView
 from ui.pano_annotation_editor import PanoAnnotationEditor
 from ui.scene_sync import (
@@ -400,6 +400,7 @@ class MainWindow(QMainWindow):
             highlight = fused.mask if should_highlight_fused(fused) else None
             self._apply_extraction_highlight(highlight)
             self._last_opening_candidate = self._opening_candidate_from_selection(idx, fused, highlight)
+            self._log_opening_selection_event("extract_opening_candidate", idx, fused, highlight)
             self.scene.set_selected_detection(fused.detection_index)
             width = f"{fused.width_m:.2f}" if fused.width_m is not None else "—"
             height = f"{fused.height_m:.2f}" if fused.height_m is not None else "—"
@@ -418,6 +419,7 @@ class MainWindow(QMainWindow):
         highlight = selection.mask if should_highlight_planar_region(selection) else None
         self._apply_extraction_highlight(highlight)
         self._last_opening_candidate = self._opening_candidate_from_selection(idx, selection, highlight)
+        self._log_opening_selection_event("extract_opening_candidate", idx, selection, highlight)
         if not supplement:
             self.scene.set_selected_detection(-1)
         width = f"{selection.width_m:.2f}" if selection.width_m is not None else "—"
@@ -449,13 +451,45 @@ class MainWindow(QMainWindow):
             "score": getattr(selection, "score", None),
         }
 
+    def _log_opening_selection_event(self, event: str, seed_idx: int, selection, highlight):
+        if self.dataset is None:
+            return
+        payload = self._opening_selection_event_payload(event, seed_idx, selection, highlight)
+        append_wall_opening_event(self.workspace, self.dataset.data_root, payload)
+
+    def _opening_selection_event_payload(self, event: str, seed_idx: int, selection, highlight) -> dict:
+        highlight_mask = None if highlight is None else np.asarray(highlight, dtype=bool)
+        payload = {
+            "event": event,
+            "source_image": self._current_source_image(),
+            "keyframe_index": int(self.current_idx),
+            "seed_index": int(seed_idx),
+            "label": str(getattr(selection, "label", "")),
+            "confidence": str(getattr(selection, "confidence", "")),
+            "reason": str(getattr(selection, "reason", "")),
+            "selection_source": str(getattr(selection, "source", "")),
+            "detection_index": int(getattr(selection, "detection_index", -1)),
+            "score": self._json_float_or_none(getattr(selection, "score", None)),
+            "width_m": self._json_float_or_none(getattr(selection, "width_m", None)),
+            "height_m": self._json_float_or_none(getattr(selection, "height_m", None)),
+            "candidate_point_count": int(getattr(selection, "point_count", 0)),
+            "highlight_point_count": self._mask_count(self._highlight_mask),
+            "supplement_mode": bool(self.cb_supplement.isChecked()),
+            "yaw_offset_deg": self._json_float_or_none(self.yaw_offset.currentData()),
+        }
+        if self.dataset is not None and highlight_mask is not None and len(highlight_mask) == len(self.dataset.points):
+            selected = np.asarray(self.dataset.points, dtype=np.float64)[highlight_mask]
+            if len(selected) > 0:
+                payload["candidate_bbox_min"] = self._rounded_list(selected.min(axis=0))
+                payload["candidate_bbox_max"] = self._rounded_list(selected.max(axis=0))
+                payload["candidate_center"] = self._rounded_list(selected.mean(axis=0))
+        return payload
+
     def _record_current_opening(self):
         if self.dataset is None or self._last_opening_candidate is None:
             self.statusBar().showMessage("请先用点云门窗提取选中一个门窗区域")
             return
-        source_image = ""
-        if self.current_idx >= 0 and self.current_idx < len(self.dataset.poses):
-            source_image = self.dataset.poses[self.current_idx].image_name
+        source_image = self._current_source_image()
         try:
             opening = opening_from_selection(
                 self.dataset.points,
@@ -473,10 +507,66 @@ class MainWindow(QMainWindow):
                 score=self._last_opening_candidate.get("score"),
             )
             saved = append_wall_opening(self.workspace, self.dataset.data_root, opening)
+            self._log_recorded_opening(saved)
         except Exception as exc:
             QMessageBox.warning(self, "门窗记录失败", str(exc))
             return
         self.statusBar().showMessage(f"已记录门窗: {saved.id} ({saved.label})")
+
+    def _log_recorded_opening(self, opening):
+        if self.dataset is None:
+            return
+        candidate_mask = np.asarray(self._last_opening_candidate.get("mask", []), dtype=bool)
+        append_wall_opening_event(
+            self.workspace,
+            self.dataset.data_root,
+            {
+                "event": "record_opening_saved",
+                "opening_id": opening.id,
+                "source_image": opening.source_image,
+                "keyframe_index": int(self.current_idx),
+                "seed_index": opening.seed_index,
+                "label": opening.label,
+                "confidence": opening.confidence,
+                "reason": opening.reason,
+                "detection_index": opening.detection_index,
+                "score": self._json_float_or_none(opening.score),
+                "width_m": self._json_float_or_none(opening.width_m),
+                "height_m": self._json_float_or_none(opening.height_m),
+                "point_count": opening.point_count,
+                "candidate_point_count": self._mask_count(candidate_mask),
+                "highlight_point_count": self._mask_count(self._highlight_mask),
+                "supplement_mode": bool(self.cb_supplement.isChecked()),
+                "yaw_offset_deg": self._json_float_or_none(self.yaw_offset.currentData()),
+                "center": list(opening.center),
+                "normal": list(opening.normal),
+                "bbox_min": list(opening.bbox_min),
+                "bbox_max": list(opening.bbox_max),
+                "z_min": opening.z_min,
+                "z_max": opening.z_max,
+            },
+        )
+
+    def _current_source_image(self) -> str:
+        if self.dataset is not None and 0 <= self.current_idx < len(self.dataset.poses):
+            return self.dataset.poses[self.current_idx].image_name
+        return ""
+
+    @staticmethod
+    def _mask_count(mask) -> int:
+        if mask is None:
+            return 0
+        return int(np.asarray(mask, dtype=bool).sum())
+
+    @staticmethod
+    def _json_float_or_none(value):
+        if value is None:
+            return None
+        return round(float(value), 5)
+
+    @staticmethod
+    def _rounded_list(values) -> list[float]:
+        return [round(float(v), 5) for v in np.asarray(values, dtype=np.float64).reshape(3)]
 
     def _try_fused_extraction(self, idx: int):
         """Run frustum-fused extraction for the current keyframe, or None."""

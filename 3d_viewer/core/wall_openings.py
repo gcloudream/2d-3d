@@ -33,6 +33,19 @@ def wall_openings_path(workspace: Path, data_root: Path) -> Path:
     return Path(workspace) / "out" / "wall_openings" / f"{Path(data_root).name}_openings.json"
 
 
+def wall_opening_events_path(workspace: Path, data_root: Path) -> Path:
+    return Path(workspace) / "out" / "wall_openings" / f"{Path(data_root).name}_events.jsonl"
+
+
+def append_wall_opening_event(workspace: Path, data_root: Path, event: dict) -> Path:
+    path = wall_opening_events_path(workspace, data_root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(event, ensure_ascii=False, sort_keys=True))
+        fh.write("\n")
+    return path
+
+
 def load_wall_openings(workspace: Path, data_root: Path) -> list[WallOpening]:
     path = wall_openings_path(workspace, data_root)
     if not path.exists():
