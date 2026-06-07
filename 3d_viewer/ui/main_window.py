@@ -21,6 +21,7 @@ from core.pointcloud_extract import (
     should_highlight_planar_region,
 )
 from core.projection import rotation_from_angle
+from core.wall_openings import append_wall_opening, opening_from_selection
 from render.scene_view import SceneView
 from ui.pano_annotation_editor import PanoAnnotationEditor
 from ui.scene_sync import (
@@ -65,6 +66,7 @@ class MainWindow(QMainWindow):
         # Accumulated door/window highlight, so 补充 (supplement) clicks can add
         # disconnected sub-regions a single seed could not reach.
         self._highlight_mask: np.ndarray | None = None
+        self._last_opening_candidate: dict | None = None
 
         self.scene = SceneView()
         self.scene.hover_changed.connect(self._on_hover)
@@ -125,6 +127,8 @@ class MainWindow(QMainWindow):
 
         self.btn_clear_highlight = QPushButton("清除高亮")
         self.btn_clear_highlight.clicked.connect(self._clear_highlight)
+        self.btn_record_opening = QPushButton("记录当前门窗")
+        self.btn_record_opening.clicked.connect(self._record_current_opening)
 
         self.cb_show_bboxes = QCheckBox("显示检测框")
         self.cb_show_bboxes.setChecked(True)
@@ -198,6 +202,7 @@ class MainWindow(QMainWindow):
         v.addWidget(self.cb_pick_pc)
         v.addWidget(self.cb_supplement)
         v.addWidget(self.btn_clear_highlight)
+        v.addWidget(self.btn_record_opening)
         v.addWidget(self.cb_show_bboxes)
         v.addWidget(QLabel("检测模式"))
         v.addWidget(self.det_mode)
@@ -275,6 +280,7 @@ class MainWindow(QMainWindow):
         self.cloud_scene.set_keyframe(pose, img)
         self._configure_observer_scene()
         self._set_highlight_mask(None)
+        self._last_opening_candidate = None
         self.scene.set_selected_detection(-1)
         self._load_detections(pose)
         self.lbl_pose.setText(
@@ -338,6 +344,7 @@ class MainWindow(QMainWindow):
 
     def _clear_highlight(self):
         self._set_highlight_mask(None)
+        self._last_opening_candidate = None
         self.scene.set_selected_detection(-1)
         self.statusBar().showMessage("已清除高亮")
 
@@ -378,6 +385,7 @@ class MainWindow(QMainWindow):
         if idx < 0:
             self.lbl_detection.setText("点云提取: 未吸附到点云点")
             self._apply_extraction_highlight(None)
+            self._last_opening_candidate = None
             return
 
         supplement = self.cb_supplement.isChecked()
@@ -391,6 +399,7 @@ class MainWindow(QMainWindow):
         if fused is not None and fused.source == "fused":
             highlight = fused.mask if should_highlight_fused(fused) else None
             self._apply_extraction_highlight(highlight)
+            self._last_opening_candidate = self._opening_candidate_from_selection(idx, fused, highlight)
             self.scene.set_selected_detection(fused.detection_index)
             width = f"{fused.width_m:.2f}" if fused.width_m is not None else "—"
             height = f"{fused.height_m:.2f}" if fused.height_m is not None else "—"
@@ -408,6 +417,7 @@ class MainWindow(QMainWindow):
         selection = extract_planar_region_from_seed(self.dataset.points, idx)
         highlight = selection.mask if should_highlight_planar_region(selection) else None
         self._apply_extraction_highlight(highlight)
+        self._last_opening_candidate = self._opening_candidate_from_selection(idx, selection, highlight)
         if not supplement:
             self.scene.set_selected_detection(-1)
         width = f"{selection.width_m:.2f}" if selection.width_m is not None else "—"
@@ -421,6 +431,52 @@ class MainWindow(QMainWindow):
             f"size: {width} × {height} m\n"
             f"reason: {selection.reason}"
         )
+
+    def _opening_candidate_from_selection(self, seed_idx: int, selection, highlight):
+        if highlight is None:
+            return None
+        return {
+            "mask": np.asarray(highlight, dtype=bool),
+            "label": selection.label,
+            "seed_index": int(seed_idx),
+            "confidence": selection.confidence,
+            "reason": selection.reason,
+            "plane_point": selection.plane_point,
+            "plane_normal": selection.plane_normal,
+            "width_m": selection.width_m,
+            "height_m": selection.height_m,
+            "detection_index": getattr(selection, "detection_index", -1),
+            "score": getattr(selection, "score", None),
+        }
+
+    def _record_current_opening(self):
+        if self.dataset is None or self._last_opening_candidate is None:
+            self.statusBar().showMessage("请先用点云门窗提取选中一个门窗区域")
+            return
+        source_image = ""
+        if self.current_idx >= 0 and self.current_idx < len(self.dataset.poses):
+            source_image = self.dataset.poses[self.current_idx].image_name
+        try:
+            opening = opening_from_selection(
+                self.dataset.points,
+                self._last_opening_candidate["mask"],
+                label=str(self._last_opening_candidate.get("label", "object")),
+                source_image=source_image,
+                seed_index=int(self._last_opening_candidate.get("seed_index", -1)),
+                confidence=str(self._last_opening_candidate.get("confidence", "")),
+                reason=str(self._last_opening_candidate.get("reason", "")),
+                plane_point=self._last_opening_candidate.get("plane_point"),
+                plane_normal=self._last_opening_candidate.get("plane_normal"),
+                width_m=self._last_opening_candidate.get("width_m"),
+                height_m=self._last_opening_candidate.get("height_m"),
+                detection_index=int(self._last_opening_candidate.get("detection_index", -1)),
+                score=self._last_opening_candidate.get("score"),
+            )
+            saved = append_wall_opening(self.workspace, self.dataset.data_root, opening)
+        except Exception as exc:
+            QMessageBox.warning(self, "门窗记录失败", str(exc))
+            return
+        self.statusBar().showMessage(f"已记录门窗: {saved.id} ({saved.label})")
 
     def _try_fused_extraction(self, idx: int):
         """Run frustum-fused extraction for the current keyframe, or None."""
