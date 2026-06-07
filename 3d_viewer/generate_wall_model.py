@@ -10,6 +10,7 @@ sys.path.insert(0, str(HERE))
 
 from core.dataset import find_default_dataset, load_dataset
 from core.wall_model import generate_wall_model
+from core.wall_openings import load_wall_openings
 
 WORKSPACE = HERE.parent
 
@@ -57,10 +58,12 @@ def main(argv: list[str] | None = None) -> int:
     if cfg is None:
         raise RuntimeError(f"no dataset found under {args.workspace}")
     dataset = load_dataset(cfg, max_points=args.max_points)
+    openings = load_wall_openings(args.workspace, dataset.data_root)
     result = generate_wall_model(
         args.workspace,
         dataset.data_root,
         dataset.points,
+        openings=openings,
         resolution_m=args.resolution,
         wall_thickness_m=args.wall_thickness,
         min_wall_length_m=args.min_wall_length,
@@ -70,6 +73,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"topdown: {result.topdown_preview_path}")
     print(f"metadata: {result.metadata_path}")
     print(f"segments: {result.segment_count}")
+    print(
+        f"openings: {result.matched_opening_count} matched, "
+        f"{result.unmatched_opening_count} unmatched"
+    )
     return 0
 
 

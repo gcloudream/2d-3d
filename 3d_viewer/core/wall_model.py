@@ -63,6 +63,8 @@ class WallModelResult:
     segment_count: int
     vertex_count: int
     face_count: int
+    matched_opening_count: int = 0
+    unmatched_opening_count: int = 0
 
 
 @dataclass(frozen=True)
@@ -106,6 +108,7 @@ def generate_wall_model(
     data_root: Path,
     points: np.ndarray,
     *,
+    openings: Iterable[WallOpening] | None = None,
     resolution_m: float = DEFAULT_RESOLUTION_M,
     wall_thickness_m: float = DEFAULT_WALL_THICKNESS_M,
     min_wall_length_m: float = DEFAULT_MIN_MODEL_WALL_LENGTH_M,
@@ -199,6 +202,10 @@ def generate_wall_model(
         segments,
         tolerance_m=DEFAULT_CONNECTION_TOLERANCE_M,
     )
+    opening_markers, unmatched_openings = match_wall_openings_to_segments(
+        list(openings or []),
+        segments,
+    )
 
     out_dir = wall_model_output_dir(workspace)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -209,6 +216,13 @@ def generate_wall_model(
     topdown_preview_path = out_dir / f"{stem}_walls_topdown.png"
 
     vertices, faces = wall_segments_to_mesh(segments, wall_thickness_m=wall_thickness_m)
+    marker_vertices, marker_faces = opening_markers_to_mesh(
+        opening_markers,
+        wall_thickness_m=wall_thickness_m,
+    )
+    marker_base = len(vertices)
+    vertices.extend(marker_vertices)
+    faces.extend(tuple(index + marker_base for index in face) for face in marker_faces)
     write_obj(obj_path, vertices, faces)
     _write_metadata(
         metadata_path,
@@ -220,6 +234,8 @@ def generate_wall_model(
         face_count=len(faces),
         wall_thickness_m=wall_thickness_m,
         resolution_m=resolution_m,
+        opening_markers=opening_markers,
+        unmatched_openings=unmatched_openings,
     )
     render_wall_model_topdown_preview(
         evidence.grid,
@@ -228,6 +244,7 @@ def generate_wall_model(
         evidence.x_min,
         evidence.y_min,
         resolution_m,
+        opening_markers=opening_markers,
     ).save(topdown_preview_path)
     render_wall_model_preview(segments, wall_thickness_m=wall_thickness_m).save(preview_path)
 
@@ -239,6 +256,8 @@ def generate_wall_model(
         segment_count=len(segments),
         vertex_count=len(vertices),
         face_count=len(faces),
+        matched_opening_count=len(opening_markers),
+        unmatched_opening_count=len(unmatched_openings),
     )
 
 
@@ -1465,6 +1484,8 @@ def _write_metadata(
     face_count: int,
     wall_thickness_m: float,
     resolution_m: float,
+    opening_markers: list[WallOpeningMarker] | None = None,
+    unmatched_openings: list[dict] | None = None,
 ) -> None:
     path.write_text(
         json.dumps(
@@ -1478,6 +1499,10 @@ def _write_metadata(
                 "wall_thickness_m": wall_thickness_m,
                 "resolution_m": resolution_m,
                 "segments": [seg.__dict__ for seg in segments],
+                "matched_opening_count": len(opening_markers or []),
+                "unmatched_opening_count": len(unmatched_openings or []),
+                "opening_markers": [marker.__dict__ for marker in (opening_markers or [])],
+                "unmatched_openings": unmatched_openings or [],
                 "mode": "prototype_ridge_outline_network_filtered_snapped_wall_mesh_from_preserved_density",
             },
             ensure_ascii=False,

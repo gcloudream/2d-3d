@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
 
 from core.dataset import Dataset, find_default_dataset, load_dataset
 from core.wall_model import WallModelResult, generate_wall_model
+from core.wall_openings import load_wall_openings
 from render.orbit_camera import OrbitCamera
 
 
@@ -368,10 +369,12 @@ class WallModelWorkbench(QWidget):
         self._show_status("正在生成墙体线图和 OBJ...")
         QApplication.processEvents()
         try:
+            openings = load_wall_openings(self.workspace, self.dataset.data_root)
             self.result = generate_wall_model(
                 self.workspace,
                 self.dataset.data_root,
                 self.dataset.points,
+                openings=openings,
                 resolution_m=float(self.resolution.value()),
             )
         except Exception as exc:
@@ -391,6 +394,8 @@ class WallModelWorkbench(QWidget):
             f"墙体线图: {result.topdown_preview_path}\n"
             f"模型预览: {result.preview_path}\n"
             f"元数据: {result.metadata_path}\n"
+            f"门窗标记: {result.matched_opening_count} matched · "
+            f"{result.unmatched_opening_count} unmatched\n"
             f"墙体段数: {result.segment_count} · 顶点: {result.vertex_count} · 面: {result.face_count}"
         )
         self._show_status(f"墙体模型已生成: {result.segment_count} 段")

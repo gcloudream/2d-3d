@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import tempfile
 import unittest
@@ -526,6 +527,59 @@ class WallModelTest(unittest.TestCase):
             self.assertTrue(result.metadata_path.exists())
             self.assertTrue(result.preview_path.exists())
             self.assertGreaterEqual(result.segment_count, 4)
+
+    def test_generate_wall_model_includes_opening_metadata(self):
+        from core.wall_openings import WallOpening
+
+        xs = np.linspace(0.0, 4.0, 45)
+        ys = np.linspace(0.0, 3.0, 35)
+        zs = np.linspace(0.0, 2.4, 12)
+        points = []
+        for z in zs:
+            for x in xs:
+                points.append([x, 0.0, z])
+                points.append([x, 3.0, z])
+            for y in ys:
+                points.append([0.0, y, z])
+                points.append([4.0, y, z])
+        points = np.asarray(points, dtype=np.float64)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            data_root = workspace / "scan"
+            data_root.mkdir()
+            opening = WallOpening(
+                id="window-0001",
+                label="window",
+                source_image="608.jpg",
+                seed_index=1,
+                point_count=20,
+                confidence="high",
+                reason="accepted_vertical_planar_region",
+                center=(0.02, 2.0, 1.2),
+                normal=(1.0, 0.0, 0.0),
+                bbox_min=(0.0, 1.6, 0.9),
+                bbox_max=(0.08, 2.4, 1.5),
+                width_m=0.8,
+                height_m=0.6,
+                z_min=0.9,
+                z_max=1.5,
+                detection_index=-1,
+                score=None,
+            )
+
+            result = generate_wall_model(
+                workspace,
+                data_root,
+                points,
+                openings=[opening],
+                resolution_m=0.1,
+            )
+
+            payload = json.loads(result.metadata_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["matched_opening_count"], 1)
+            self.assertEqual(payload["unmatched_opening_count"], 0)
+            self.assertEqual(payload["opening_markers"][0]["opening_id"], "window-0001")
 
 
 if __name__ == "__main__":
