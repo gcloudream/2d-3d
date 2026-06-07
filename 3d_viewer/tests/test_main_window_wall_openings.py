@@ -19,7 +19,14 @@ sys.path.insert(0, str(ROOT))
 from PySide6.QtWidgets import QApplication
 
 from core.dataset import Dataset
-from core.wall_openings import load_wall_openings, wall_opening_events_path
+from core.wall_openings import (
+    WallOpening,
+    append_wall_opening_event,
+    load_wall_openings,
+    save_wall_openings,
+    wall_opening_events_path,
+    wall_openings_path,
+)
 from ui.main_window import MainWindow
 
 
@@ -93,6 +100,60 @@ class MainWindowWallOpeningsTest(unittest.TestCase):
             self.assertEqual(event["record_mask_source"], "latest_highlight")
             self.assertEqual(event["reason"], "accepted_vertical_planar_region")
             self.assertEqual(event["bbox_min"], [1.0, 0.0, 0.8])
+
+    def test_load_clears_previous_wall_opening_session_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            data_root = workspace / "scan"
+            data_root.mkdir()
+            dataset = Dataset(
+                data_root=data_root,
+                camera_file=data_root / "camera_pos.cam",
+                image_dir=data_root,
+                pointcloud_file=data_root / "cloud.las",
+                poses=[],
+                points=np.asarray([[1.0, 0.0, 0.8]], dtype=np.float64),
+                colors=np.zeros((1, 3), dtype=np.uint8),
+                total_points=1,
+                sample_step=1,
+                pano_calibration=None,
+                pano_yaw_offset_deg=0.0,
+            )
+            opening = WallOpening(
+                id="window-0001",
+                label="window",
+                source_image="608.jpg",
+                seed_index=1,
+                point_count=3,
+                confidence="high",
+                reason="accepted_vertical_planar_region",
+                center=(1.0, 0.4, 1.0),
+                normal=(1.0, 0.0, 0.0),
+                bbox_min=(1.0, 0.0, 0.8),
+                bbox_max=(1.0, 0.8, 1.6),
+                width_m=0.8,
+                height_m=0.8,
+                z_min=0.8,
+                z_max=1.6,
+                detection_index=2,
+                score=0.8,
+            )
+            save_wall_openings(workspace, data_root, [opening])
+            append_wall_opening_event(workspace, data_root, {"event": "record_opening_saved"})
+            other_root = workspace / "other_scan"
+            other_root.mkdir()
+            save_wall_openings(workspace, other_root, [opening])
+            append_wall_opening_event(workspace, other_root, {"event": "record_opening_saved"})
+
+            with patch("ui.main_window.find_default_dataset", return_value=object()), \
+                patch("ui.main_window.load_dataset", return_value=dataset):
+                win = MainWindow(workspace)
+            self.addCleanup(win.close)
+
+            self.assertFalse(wall_openings_path(workspace, data_root).exists())
+            self.assertFalse(wall_opening_events_path(workspace, data_root).exists())
+            self.assertTrue(wall_openings_path(workspace, other_root).exists())
+            self.assertTrue(wall_opening_events_path(workspace, other_root).exists())
 
     def test_clear_highlight_clears_opening_candidate(self):
         with patch.object(MainWindow, "_load", lambda self: None):

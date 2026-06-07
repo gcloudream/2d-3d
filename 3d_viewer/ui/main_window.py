@@ -21,7 +21,12 @@ from core.pointcloud_extract import (
     should_highlight_planar_region,
 )
 from core.projection import rotation_from_angle
-from core.wall_openings import append_wall_opening, append_wall_opening_event, opening_from_selection
+from core.wall_openings import (
+    append_wall_opening,
+    append_wall_opening_event,
+    clear_wall_opening_session_files,
+    opening_from_selection,
+)
 from render.scene_view import SceneView
 from ui.pano_annotation_editor import PanoAnnotationEditor
 from ui.scene_sync import (
@@ -241,6 +246,7 @@ class MainWindow(QMainWindow):
             return
 
         d = self.dataset
+        clear_wall_opening_session_files(self.workspace, d.data_root)
         self._set_yaw_offset_value(d.pano_yaw_offset_deg)
         self.scene.set_world_points(d.points, d.colors)
         self.cloud_scene.set_world_points(d.points, d.colors)
