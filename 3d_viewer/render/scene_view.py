@@ -128,6 +128,7 @@ class _SceneGLWindow(QOpenGLWindow):
         self._pano: PanoSphere | None = None
         self._pc: PointCloud | None = None
         self._bbox_overlay: BboxOverlay | None = None
+        self._pano_yaw_offset_deg = 0.0
         self._show_pano = True
         self._show_pc = True
         self._show_bboxes = True
@@ -174,7 +175,7 @@ class _SceneGLWindow(QOpenGLWindow):
                 pose.roll,
                 pose.pitch,
                 pose.yaw,
-                self._pano.yaw_offset_deg,
+                self._pano_yaw_offset_deg,
             )
         self._current_pose = pose
         self._selected_detection = -1
@@ -195,14 +196,15 @@ class _SceneGLWindow(QOpenGLWindow):
             self.update()
 
     def set_pano_yaw_offset(self, degrees: float):
+        self._pano_yaw_offset_deg = float(degrees)
         if self._pano is not None:
-            self._pano.set_yaw_offset(degrees)
+            self._pano.set_yaw_offset(self._pano_yaw_offset_deg)
             if self._current_pose is not None and not self._global_view_mode:
                 self.camera.update_keyframe_yaw_reference(
                     self._current_pose.roll,
                     self._current_pose.pitch,
                     self._current_pose.yaw,
-                    degrees,
+                    self._pano_yaw_offset_deg,
                 )
             self._refresh_bbox_overlay()
             self.update()
@@ -274,7 +276,7 @@ class _SceneGLWindow(QOpenGLWindow):
             self._current_pose.pitch,
             self._current_pose.yaw,
         )
-        yaw_offset = self._pano.yaw_offset_deg if self._pano is not None else 0.0
+        yaw_offset = self._pano_yaw_offset_deg
         self._bbox_overlay.set_detections(
             self._detections,
             img_w,
@@ -291,6 +293,7 @@ class _SceneGLWindow(QOpenGLWindow):
         self._ctx.enable(moderngl.DEPTH_TEST)
         self._ctx.enable(moderngl.PROGRAM_POINT_SIZE)
         self._pano = PanoSphere(self._ctx)
+        self._pano.set_yaw_offset(self._pano_yaw_offset_deg)
         self._pc = PointCloud(self._ctx)
         self._pc.set_selected_depth_test(self._selected_depth_test)
         self._bbox_overlay = BboxOverlay(self._ctx)
@@ -310,7 +313,7 @@ class _SceneGLWindow(QOpenGLWindow):
                     pose.roll,
                     pose.pitch,
                     pose.yaw,
-                    self._pano.yaw_offset_deg,
+                    self._pano_yaw_offset_deg,
                 )
             self._current_pose = pose
             self._pending_pose = None
@@ -484,7 +487,7 @@ class _SceneGLWindow(QOpenGLWindow):
             self._current_pose.pitch,
             self._current_pose.yaw,
         )
-        yaw_offset = self._pano.yaw_offset_deg if self._pano is not None else 0.0
+        yaw_offset = self._pano_yaw_offset_deg
         uv = project_points_to_panorama(
             (self._current_pose.position + ray).reshape(1, 3),
             self._current_pose.position,

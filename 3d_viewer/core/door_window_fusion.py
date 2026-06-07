@@ -20,7 +20,7 @@ This module orchestrates that fusion; it owns no new geometry maths and reuses
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from typing import Sequence
 
 import numpy as np
@@ -73,6 +73,62 @@ def _empty(n: int, reason: str) -> FusedSelection:
     )
 
 
+def _selection_from_region(
+    region: PlanarRegionSelection,
+    *,
+    detection_index: int,
+    label_hint: str | None,
+    score: float | None,
+) -> FusedSelection:
+    if region.confidence == "high":
+        fused_conf = "high"
+        fused_reason = "fused_frustum_and_planar_geometry"
+    elif region.point_count > 0:
+        fused_conf = "medium"
+        fused_reason = f"frustum_only_{region.reason}"
+    else:
+        fused_conf = "low"
+        fused_reason = region.reason
+
+    return FusedSelection(
+        mask=region.mask,
+        point_count=region.point_count,
+        confidence=fused_conf,
+        reason=fused_reason,
+        label=region.label or (label_hint or "object"),
+        source="fused",
+        detection_index=int(detection_index),
+        score=score,
+        plane_point=region.plane_point,
+        plane_normal=region.plane_normal,
+        width_m=region.width_m,
+        height_m=region.height_m,
+    )
+
+
+def _frustum_candidate_mask_from_uv(
+    uv: np.ndarray,
+    detection: dict,
+    pano_w: float,
+) -> np.ndarray:
+    matches = match_points_to_detections(uv, [detection], float(pano_w))
+    return matches.match_indices >= 0
+
+
+def _depth_clipped_candidate_mask(
+    base_candidate: np.ndarray,
+    distances: np.ndarray,
+    seed_idx: int,
+    depth_window: float | None,
+) -> np.ndarray:
+    candidate = np.asarray(base_candidate, dtype=bool).copy()
+    if depth_window is not None:
+        seed_depth = float(distances[seed_idx])
+        candidate &= np.abs(distances - seed_depth) <= float(depth_window)
+        candidate[seed_idx] = True
+    return candidate
+
+
 def frustum_candidate_mask(
     points: np.ndarray,
     cam_pos: np.ndarray,
@@ -93,14 +149,11 @@ def frustum_candidate_mask(
     uv = project_points_to_panorama(
         points, cam_pos, R_pano, img_w, img_h, yaw_offset_deg=yaw_offset_deg
     )
-    matches = match_points_to_detections(uv, [detection], float(img_w))
-    inside = matches.match_indices >= 0
+    inside = _frustum_candidate_mask_from_uv(uv, detection, float(img_w))
     if seed_idx is not None and depth_window is not None:
         cam = np.asarray(cam_pos, dtype=np.float64).reshape(3)
         dist = np.linalg.norm(np.asarray(points, dtype=np.float64) - cam.reshape(1, 3), axis=1)
-        seed_depth = float(dist[seed_idx])
-        inside = inside & (np.abs(dist - seed_depth) <= float(depth_window))
-        inside[seed_idx] = True
+        inside = _depth_clipped_candidate_mask(inside, dist, seed_idx, depth_window)
     return inside
 
 
@@ -141,7 +194,7 @@ def fuse_detection_and_pointcloud(
 
     detection = detections[det_idx]
     label = str(detection.get("label", "")).lower() or None
-    score = float(detection["score"]) if "score" in detection else None
+    detection_score = float(detection["score"]) if "score" in detection else None
 
     # 2. Frustum candidate set for that detection, depth-clipped around the seed.
     candidate = frustum_candidate_mask(
@@ -163,30 +216,11 @@ def fuse_detection_and_pointcloud(
 
     # 5. Fuse the confidences. The frustum already agreed (seed is inside it), so
     #    a high-confidence geometry means both judges concur.
-    if region.confidence == "high":
-        fused_conf = "high"
-        fused_reason = "fused_frustum_and_planar_geometry"
-    elif region.point_count > 0:
-        # Frustum matched but geometry could not confirm a clean planar door.
-        fused_conf = "medium"
-        fused_reason = f"frustum_only_{region.reason}"
-    else:
-        fused_conf = "low"
-        fused_reason = region.reason
-
-    return FusedSelection(
-        mask=region.mask,
-        point_count=region.point_count,
-        confidence=fused_conf,
-        reason=fused_reason,
-        label=region.label or (label or "object"),
-        source="fused",
+    return _selection_from_region(
+        region,
         detection_index=det_idx,
-        score=score,
-        plane_point=region.plane_point,
-        plane_normal=region.plane_normal,
-        width_m=region.width_m,
-        height_m=region.height_m,
+        label_hint=label,
+        score=detection_score,
     )
 
 
@@ -212,21 +246,16 @@ def extract_detection_region_from_bbox(
         return _empty(n, "invalid_image_size")
 
     detection = detections[detection_index]
+    label = str(detection.get("label", "")).lower() or None
+    detection_score = float(detection["score"]) if "score" in detection else None
+    cam = np.asarray(cam_pos, dtype=np.float64).reshape(3)
+    pts64 = np.asarray(pts, dtype=np.float64)
+    distances = np.linalg.norm(pts64 - cam.reshape(1, 3), axis=1)
     uv = project_points_to_panorama(
         pts, cam_pos, R_pano, img_w, img_h, yaw_offset_deg=yaw_offset_deg
     )
     target_uv = _valid_click_uv(click_uv, float(img_w))
-    candidate = frustum_candidate_mask(
-        pts,
-        cam_pos,
-        R_pano,
-        img_w,
-        img_h,
-        detection,
-        yaw_offset_deg=yaw_offset_deg,
-        seed_idx=None,
-        depth_window=None,
-    )
+    candidate = _frustum_candidate_mask_from_uv(uv, detection, float(img_w))
     candidate_indices = np.flatnonzero(candidate)
     if len(candidate_indices) == 0:
         return _empty(n, "bbox_no_points")
@@ -241,22 +270,29 @@ def extract_detection_region_from_bbox(
         click_uv=target_uv,
         pano_w=float(img_w),
     ):
-        selection = fuse_detection_and_pointcloud(
+        clipped_candidate = _depth_clipped_candidate_mask(
+            candidate,
+            distances,
+            int(seed_idx),
+            DEFAULT_FRUSTUM_DEPTH_WINDOW,
+        )
+        region = extract_planar_region_from_seed(
             pts,
             int(seed_idx),
-            [detection],
-            cam_pos,
-            R_pano,
-            img_w,
-            img_h,
-            yaw_offset_deg=yaw_offset_deg,
+            candidate_mask=clipped_candidate,
+            label_hint=label,
         )
-        selection = replace(selection, detection_index=int(detection_index))
-        score = _fused_selection_score(selection, uv=uv, click_uv=target_uv, pano_w=float(img_w))
+        selection = _selection_from_region(
+            region,
+            detection_index=int(detection_index),
+            label_hint=label,
+            score=detection_score,
+        )
+        selection_score = _fused_selection_score(selection, uv=uv, click_uv=target_uv, pano_w=float(img_w))
         best_score = None if best is None else _fused_selection_score(
             best, uv=uv, click_uv=target_uv, pano_w=float(img_w)
         )
-        if best_score is None or score > best_score:
+        if best_score is None or selection_score > best_score:
             best = selection
 
     if best is None or best.point_count <= 0:

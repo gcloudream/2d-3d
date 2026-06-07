@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 
@@ -139,6 +140,26 @@ class FusionTest(unittest.TestCase):
 
         self.assertGreater(selected_left.mask[: len(left)].sum(), selected_left.mask[len(left):].sum())
         self.assertGreater(selected_right.mask[len(left):].sum(), selected_right.mask[: len(left)].sum())
+
+    def test_extract_detection_region_from_bbox_reuses_projection_for_auto_seeds(self):
+        with patch(
+            "core.door_window_fusion.project_points_to_panorama",
+            wraps=project_points_to_panorama,
+        ) as project:
+            fused = extract_detection_region_from_bbox(
+                self.points,
+                0,
+                [self.detection],
+                self.cam,
+                self.R,
+                self.img_w,
+                self.img_h,
+                yaw_offset_deg=0.0,
+                max_seed_count=4,
+            )
+
+        self.assertGreater(fused.point_count, 0)
+        self.assertEqual(project.call_count, 1)
 
     def test_fusion_reports_seed_outside_any_frustum(self):
         # A seed on the far wall, projected outside the (door-sized) bbox edges.
