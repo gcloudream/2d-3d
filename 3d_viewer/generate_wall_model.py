@@ -75,6 +75,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"segments: {result.segment_count}")
     print(
         f"openings: {result.matched_opening_count} matched, "
+        f"{result.projected_opening_count} projected, "
         f"{result.unmatched_opening_count} unmatched"
     )
     return 0

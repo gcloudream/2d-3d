@@ -64,6 +64,7 @@ class WallModelResult:
     vertex_count: int
     face_count: int
     matched_opening_count: int = 0
+    projected_opening_count: int = 0
     unmatched_opening_count: int = 0
 
 
@@ -202,10 +203,12 @@ def generate_wall_model(
         segments,
         tolerance_m=DEFAULT_CONNECTION_TOLERANCE_M,
     )
+    opening_records = list(openings or [])
     opening_markers, unmatched_openings = match_wall_openings_to_segments(
-        list(openings or []),
+        opening_records,
         segments,
     )
+    projected_openings = _projected_openings_from_unmatched(opening_records, unmatched_openings)
 
     out_dir = wall_model_output_dir(workspace)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -235,6 +238,7 @@ def generate_wall_model(
         wall_thickness_m=wall_thickness_m,
         resolution_m=resolution_m,
         opening_markers=opening_markers,
+        projected_openings=projected_openings,
         unmatched_openings=unmatched_openings,
     )
     render_wall_model_topdown_preview(
@@ -245,6 +249,7 @@ def generate_wall_model(
         evidence.y_min,
         resolution_m,
         opening_markers=opening_markers,
+        projected_openings=projected_openings,
     ).save(topdown_preview_path)
     render_wall_model_preview(segments, wall_thickness_m=wall_thickness_m).save(preview_path)
 
@@ -257,6 +262,7 @@ def generate_wall_model(
         vertex_count=len(vertices),
         face_count=len(faces),
         matched_opening_count=len(opening_markers),
+        projected_opening_count=len(projected_openings),
         unmatched_opening_count=len(unmatched_openings),
     )
 
@@ -801,7 +807,7 @@ def match_wall_openings_to_segments(
 ) -> tuple[list[WallOpeningMarker], list[dict]]:
     matched: list[WallOpeningMarker] = []
     unmatched: list[dict] = []
-    for opening in openings:
+    for opening_index, opening in enumerate(openings):
         best = None
         best_distance = float("inf")
         center = np.asarray(opening.center, dtype=np.float64)
@@ -828,11 +834,25 @@ def match_wall_openings_to_segments(
                 best_distance = distance
                 best = (index, seg, wall_coord, max(seg_min, axis_min), min(seg_max, axis_max), side)
         if best is None:
-            unmatched.append({"id": opening.id, "label": opening.label, "reason": "no_matching_wall_segment"})
+            unmatched.append(
+                {
+                    "opening_index": opening_index,
+                    "id": opening.id,
+                    "label": opening.label,
+                    "reason": "no_matching_wall_segment",
+                }
+            )
             continue
         index, seg, wall_coord, axis_min, axis_max, side = best
         if axis_max <= axis_min:
-            unmatched.append({"id": opening.id, "label": opening.label, "reason": "empty_projected_opening_span"})
+            unmatched.append(
+                {
+                    "opening_index": opening_index,
+                    "id": opening.id,
+                    "label": opening.label,
+                    "reason": "empty_projected_opening_span",
+                }
+            )
             continue
         matched.append(
             WallOpeningMarker(
@@ -885,6 +905,20 @@ def opening_markers_to_mesh(
                 marker_depth_m=marker_depth_m,
             )
     return vertices, faces
+
+
+def _projected_openings_from_unmatched(
+    openings: list[WallOpening],
+    unmatched_openings: list[dict],
+) -> list[WallOpening]:
+    projected: list[WallOpening] = []
+    for item in unmatched_openings:
+        opening_index = item.get("opening_index")
+        if not isinstance(opening_index, int):
+            continue
+        if 0 <= opening_index < len(openings):
+            projected.append(openings[opening_index])
+    return projected
 
 
 def _append_marker_strip_box(
@@ -980,6 +1014,7 @@ def render_wall_model_topdown_preview(
     resolution_m: float,
     *,
     opening_markers: list[WallOpeningMarker] | None = None,
+    projected_openings: list[WallOpening] | None = None,
 ) -> Image.Image:
     density = np.log1p(np.asarray(grid, dtype=np.float32))
     if float(density.max()) > 0.0:
@@ -1009,6 +1044,14 @@ def render_wall_model_topdown_preview(
             y = height - 1 - (marker.wall_coord - y_min) / resolution_m
             draw.line((x1, y, x2, y), fill=color, width=7)
             draw.line((x1, y, x2, y), fill=(10, 20, 15), width=2)
+    for opening in projected_openings or []:
+        ox1 = (opening.bbox_min[0] - x_min) / resolution_m
+        ox2 = (opening.bbox_max[0] - x_min) / resolution_m
+        oy1 = height - 1 - (opening.bbox_min[1] - y_min) / resolution_m
+        oy2 = height - 1 - (opening.bbox_max[1] - y_min) / resolution_m
+        rect = (min(ox1, ox2), min(oy1, oy2), max(ox1, ox2), max(oy1, oy2))
+        draw.rectangle(rect, outline=(255, 150, 35), width=4)
+        draw.rectangle(rect, outline=(20, 15, 5), width=1)
     return image
 
 
@@ -1485,6 +1528,7 @@ def _write_metadata(
     wall_thickness_m: float,
     resolution_m: float,
     opening_markers: list[WallOpeningMarker] | None = None,
+    projected_openings: list[WallOpening] | None = None,
     unmatched_openings: list[dict] | None = None,
 ) -> None:
     path.write_text(
@@ -1500,8 +1544,12 @@ def _write_metadata(
                 "resolution_m": resolution_m,
                 "segments": [seg.__dict__ for seg in segments],
                 "matched_opening_count": len(opening_markers or []),
+                "projected_opening_count": len(projected_openings or []),
                 "unmatched_opening_count": len(unmatched_openings or []),
                 "opening_markers": [marker.__dict__ for marker in (opening_markers or [])],
+                "projected_openings": [
+                    _projected_opening_metadata(opening) for opening in (projected_openings or [])
+                ],
                 "unmatched_openings": unmatched_openings or [],
                 "mode": "prototype_ridge_outline_network_filtered_snapped_wall_mesh_from_preserved_density",
             },
@@ -1510,6 +1558,21 @@ def _write_metadata(
         ),
         encoding="utf-8",
     )
+
+
+def _projected_opening_metadata(opening: WallOpening) -> dict:
+    return {
+        "id": opening.id,
+        "label": opening.label,
+        "source_image": opening.source_image,
+        "confidence": opening.confidence,
+        "reason": opening.reason,
+        "center": list(opening.center),
+        "bbox_min": list(opening.bbox_min),
+        "bbox_max": list(opening.bbox_max),
+        "z_min": opening.z_min,
+        "z_max": opening.z_max,
+    }
 
 
 def _close_1d_gaps(values: np.ndarray, max_gap: int) -> np.ndarray:

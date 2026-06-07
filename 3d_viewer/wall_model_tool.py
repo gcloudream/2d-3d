@@ -395,6 +395,7 @@ class WallModelWorkbench(QWidget):
             f"模型预览: {result.preview_path}\n"
             f"元数据: {result.metadata_path}\n"
             f"门窗标记: {result.matched_opening_count} matched · "
+            f"{result.projected_opening_count} projected · "
             f"{result.unmatched_opening_count} unmatched\n"
             f"墙体段数: {result.segment_count} · 顶点: {result.vertex_count} · 面: {result.face_count}"
         )

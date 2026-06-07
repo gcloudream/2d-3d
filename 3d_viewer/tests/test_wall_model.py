@@ -473,6 +473,46 @@ class WallModelTest(unittest.TestCase):
         green_pixels = (pixels[:, :, 1] > 180) & (pixels[:, :, 0] < 80)
         self.assertTrue(green_pixels.any())
 
+    def test_topdown_preview_draws_projected_unmatched_opening(self):
+        from core.wall_openings import WallOpening
+        from core.wall_model import render_wall_model_topdown_preview
+
+        grid = np.zeros((80, 80), dtype=np.uint8)
+        wall_mask = np.zeros_like(grid, dtype=bool)
+        opening = WallOpening(
+            id="window-0001",
+            label="window",
+            source_image="608.jpg",
+            seed_index=1,
+            point_count=20,
+            confidence="medium",
+            reason="frustum_only_rejected_not_vertical_plane",
+            center=(1.2, 1.2, 0.5),
+            normal=(1.0, 0.0, 0.0),
+            bbox_min=(1.0, 1.0, 0.2),
+            bbox_max=(1.6, 1.5, 0.8),
+            width_m=0.6,
+            height_m=0.6,
+            z_min=0.2,
+            z_max=0.8,
+            detection_index=-1,
+            score=None,
+        )
+
+        image = render_wall_model_topdown_preview(
+            grid,
+            wall_mask,
+            [],
+            x_min=0.0,
+            y_min=0.0,
+            resolution_m=0.05,
+            projected_openings=[opening],
+        )
+
+        pixels = np.asarray(image)
+        orange_pixels = (pixels[:, :, 0] > 200) & (pixels[:, :, 1] > 90) & (pixels[:, :, 1] < 190)
+        self.assertTrue(orange_pixels.any())
+
     def test_opening_marker_frames_create_extra_mesh(self):
         from core.wall_model import WallOpeningMarker, opening_markers_to_mesh
 
@@ -579,7 +619,65 @@ class WallModelTest(unittest.TestCase):
             payload = json.loads(result.metadata_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["matched_opening_count"], 1)
             self.assertEqual(payload["unmatched_opening_count"], 0)
+            self.assertEqual(payload["projected_opening_count"], 0)
+            self.assertEqual(result.projected_opening_count, 0)
             self.assertEqual(payload["opening_markers"][0]["opening_id"], "window-0001")
+
+    def test_generate_wall_model_projects_unmatched_opening_metadata(self):
+        from core.wall_openings import WallOpening
+
+        xs = np.linspace(0.0, 4.0, 45)
+        ys = np.linspace(0.0, 3.0, 35)
+        zs = np.linspace(0.0, 2.4, 12)
+        points = []
+        for z in zs:
+            for x in xs:
+                points.append([x, 0.0, z])
+                points.append([x, 3.0, z])
+            for y in ys:
+                points.append([0.0, y, z])
+                points.append([4.0, y, z])
+        points = np.asarray(points, dtype=np.float64)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            data_root = workspace / "scan"
+            data_root.mkdir()
+            opening = WallOpening(
+                id="window-0001",
+                label="window",
+                source_image="608.jpg",
+                seed_index=1,
+                point_count=20,
+                confidence="medium",
+                reason="frustum_only_rejected_not_vertical_plane",
+                center=(2.0, 1.5, 0.5),
+                normal=(1.0, 0.0, 0.0),
+                bbox_min=(1.8, 1.3, 0.2),
+                bbox_max=(2.2, 1.7, 0.8),
+                width_m=0.4,
+                height_m=0.6,
+                z_min=0.2,
+                z_max=0.8,
+                detection_index=-1,
+                score=None,
+            )
+
+            result = generate_wall_model(
+                workspace,
+                data_root,
+                points,
+                openings=[opening],
+                resolution_m=0.1,
+            )
+
+            payload = json.loads(result.metadata_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["matched_opening_count"], 0)
+            self.assertEqual(payload["unmatched_opening_count"], 1)
+            self.assertEqual(payload["projected_opening_count"], 1)
+            self.assertEqual(result.projected_opening_count, 1)
+            self.assertEqual(payload["projected_openings"][0]["id"], "window-0001")
+            self.assertEqual(payload["opening_markers"], [])
 
 
 if __name__ == "__main__":
