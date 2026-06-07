@@ -534,8 +534,42 @@ class WallModelTest(unittest.TestCase):
 
         self.assertGreater(len(vertices), 0)
         self.assertGreater(len(faces), 0)
-        self.assertEqual(len(vertices) % 8, 0)
-        self.assertEqual(len(faces) % 6, 0)
+        self.assertGreaterEqual(len(vertices), 36)
+        self.assertGreaterEqual(len(faces), 25)
+
+    def test_opening_marker_mesh_includes_colored_fill_panel(self):
+        from core.wall_model import WallOpeningMarker, opening_markers_to_mesh
+
+        marker = WallOpeningMarker(
+            opening_id="door-0001",
+            label="door",
+            segment_index=0,
+            orientation="horizontal",
+            wall_coord=2.0,
+            axis_min=0.5,
+            axis_max=1.3,
+            z_min=0.0,
+            z_max=2.1,
+            side=1.0,
+        )
+
+        vertices, faces = opening_markers_to_mesh([marker], wall_thickness_m=0.08)
+
+        fill_faces = []
+        for face in faces:
+            pts = [vertices[index - 1] for index in face]
+            xs = [pt[0] for pt in pts]
+            ys = [pt[1] for pt in pts]
+            zs = [pt[2] for pt in pts]
+            if (
+                abs(min(xs) - 0.5) < 1e-6
+                and abs(max(xs) - 1.3) < 1e-6
+                and max(ys) - min(ys) < 1e-6
+                and abs(min(zs) - 0.0) < 1e-6
+                and abs(max(zs) - 2.1) < 1e-6
+            ):
+                fill_faces.append(face)
+        self.assertEqual(len(fill_faces), 1)
 
     def test_generates_wall_model_artifacts_for_synthetic_room(self):
         xs = np.linspace(0.0, 4.0, 45)

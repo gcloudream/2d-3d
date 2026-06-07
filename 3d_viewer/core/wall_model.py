@@ -928,6 +928,17 @@ def opening_markers_to_mesh(
                 wall_thickness_m=wall_thickness_m,
                 marker_depth_m=marker_depth_m,
             )
+        _append_marker_fill_panel(
+            vertices,
+            faces,
+            marker,
+            axis_min,
+            axis_max,
+            z_min,
+            z_max,
+            wall_thickness_m=wall_thickness_m,
+            marker_depth_m=marker_depth_m,
+        )
     return vertices, faces
 
 
@@ -1004,6 +1015,39 @@ def _append_marker_strip_box(
         (base + 2, base + 6, base + 7, base + 3),
         (base + 3, base + 7, base + 4, base + 0),
     ])
+
+
+def _append_marker_fill_panel(
+    vertices: list[tuple[float, float, float]],
+    faces: list[tuple[int, int, int, int]],
+    marker: WallOpeningMarker,
+    axis_min: float,
+    axis_max: float,
+    z_min: float,
+    z_max: float,
+    *,
+    wall_thickness_m: float,
+    marker_depth_m: float,
+) -> None:
+    offset = marker.side * (wall_thickness_m / 2.0 + 0.01 + marker_depth_m + 0.003)
+    base = len(vertices) + 1
+    if marker.orientation == "vertical":
+        x = marker.wall_coord + offset
+        vertices.extend([
+            (x, axis_min, z_min),
+            (x, axis_max, z_min),
+            (x, axis_max, z_max),
+            (x, axis_min, z_max),
+        ])
+    else:
+        y = marker.wall_coord + offset
+        vertices.extend([
+            (axis_min, y, z_min),
+            (axis_max, y, z_min),
+            (axis_max, y, z_max),
+            (axis_min, y, z_max),
+        ])
+    faces.append((base + 0, base + 1, base + 2, base + 3))
 
 
 def wall_segments_to_mesh(
