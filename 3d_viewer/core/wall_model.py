@@ -832,6 +832,81 @@ def match_wall_openings_to_segments(
     return matched, unmatched
 
 
+def opening_markers_to_mesh(
+    markers: Iterable[WallOpeningMarker],
+    *,
+    wall_thickness_m: float = DEFAULT_WALL_THICKNESS_M,
+    frame_width_m: float = 0.04,
+    marker_depth_m: float = 0.025,
+) -> tuple[list[tuple[float, float, float]], list[tuple[int, int, int, int]]]:
+    vertices: list[tuple[float, float, float]] = []
+    faces: list[tuple[int, int, int, int]] = []
+    for marker in markers:
+        axis_min, axis_max = sorted((marker.axis_min, marker.axis_max))
+        z_min, z_max = sorted((marker.z_min, marker.z_max))
+        if axis_max <= axis_min or z_max <= z_min:
+            continue
+        fw = min(frame_width_m, (axis_max - axis_min) / 2.0, (z_max - z_min) / 2.0)
+        strips = [
+            (axis_min, axis_max, z_min, z_min + fw),
+            (axis_min, axis_max, z_max - fw, z_max),
+            (axis_min, axis_min + fw, z_min, z_max),
+            (axis_max - fw, axis_max, z_min, z_max),
+        ]
+        for a1, a2, z1, z2 in strips:
+            _append_marker_strip_box(
+                vertices,
+                faces,
+                marker,
+                a1,
+                a2,
+                z1,
+                z2,
+                wall_thickness_m=wall_thickness_m,
+                marker_depth_m=marker_depth_m,
+            )
+    return vertices, faces
+
+
+def _append_marker_strip_box(
+    vertices: list[tuple[float, float, float]],
+    faces: list[tuple[int, int, int, int]],
+    marker: WallOpeningMarker,
+    axis_min: float,
+    axis_max: float,
+    z_min: float,
+    z_max: float,
+    *,
+    wall_thickness_m: float,
+    marker_depth_m: float,
+) -> None:
+    face_offset = marker.side * (wall_thickness_m / 2.0 + 0.01)
+    depth = marker.side * marker_depth_m
+    if marker.orientation == "vertical":
+        x1 = marker.wall_coord + face_offset
+        x2 = marker.wall_coord + face_offset + depth
+        y1, y2 = axis_min, axis_max
+    else:
+        x1, x2 = axis_min, axis_max
+        y1 = marker.wall_coord + face_offset
+        y2 = marker.wall_coord + face_offset + depth
+    x1, x2 = sorted((x1, x2))
+    y1, y2 = sorted((y1, y2))
+    base = len(vertices) + 1
+    vertices.extend([
+        (x1, y1, z_min), (x2, y1, z_min), (x2, y2, z_min), (x1, y2, z_min),
+        (x1, y1, z_max), (x2, y1, z_max), (x2, y2, z_max), (x1, y2, z_max),
+    ])
+    faces.extend([
+        (base + 0, base + 1, base + 2, base + 3),
+        (base + 4, base + 7, base + 6, base + 5),
+        (base + 0, base + 4, base + 5, base + 1),
+        (base + 1, base + 5, base + 6, base + 2),
+        (base + 2, base + 6, base + 7, base + 3),
+        (base + 3, base + 7, base + 4, base + 0),
+    ])
+
+
 def wall_segments_to_mesh(
     segments: Iterable[WallSegment],
     *,
