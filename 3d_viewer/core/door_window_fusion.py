@@ -20,7 +20,7 @@ This module orchestrates that fusion; it owns no new geometry maths and reuses
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Sequence
 
 import numpy as np
@@ -37,6 +37,7 @@ from core.projection import project_points_to_panorama
 # join the seed's depth shell (separates the near door from the far wall that
 # share the same bbox cone before geometry growth runs).
 DEFAULT_FRUSTUM_DEPTH_WINDOW = 0.6
+DEFAULT_AUTO_SEED_COUNT = 24
 
 
 @dataclass(frozen=True)
@@ -187,6 +188,92 @@ def fuse_detection_and_pointcloud(
         width_m=region.width_m,
         height_m=region.height_m,
     )
+
+
+def extract_detection_region_from_bbox(
+    points: np.ndarray,
+    detection_index: int,
+    detections: Sequence[dict],
+    cam_pos: np.ndarray,
+    R_pano: np.ndarray,
+    img_w: int,
+    img_h: int,
+    yaw_offset_deg: float = 0.0,
+    *,
+    max_seed_count: int = DEFAULT_AUTO_SEED_COUNT,
+) -> FusedSelection:
+    """Extract a detection's best door/window region without a manually clicked seed."""
+    pts = np.asarray(points)
+    n = len(pts)
+    if detection_index < 0 or detection_index >= len(detections):
+        return _empty(n, "detection_index_out_of_range")
+    if img_w <= 0 or img_h <= 0:
+        return _empty(n, "invalid_image_size")
+
+    detection = detections[detection_index]
+    candidate = frustum_candidate_mask(
+        pts,
+        cam_pos,
+        R_pano,
+        img_w,
+        img_h,
+        detection,
+        yaw_offset_deg=yaw_offset_deg,
+        seed_idx=None,
+        depth_window=None,
+    )
+    candidate_indices = np.flatnonzero(candidate)
+    if len(candidate_indices) == 0:
+        return _empty(n, "bbox_no_points")
+
+    best: FusedSelection | None = None
+    for seed_idx in _auto_seed_indices(
+        pts,
+        candidate_indices,
+        cam_pos,
+        max_seed_count=max_seed_count,
+    ):
+        selection = fuse_detection_and_pointcloud(
+            pts,
+            int(seed_idx),
+            [detection],
+            cam_pos,
+            R_pano,
+            img_w,
+            img_h,
+            yaw_offset_deg=yaw_offset_deg,
+        )
+        selection = replace(selection, detection_index=int(detection_index))
+        if best is None or _fused_selection_score(selection) > _fused_selection_score(best):
+            best = selection
+
+    if best is None or best.point_count <= 0:
+        return _empty(n, "bbox_no_extractable_region")
+    return best
+
+
+def _auto_seed_indices(
+    points: np.ndarray,
+    candidate_indices: np.ndarray,
+    cam_pos: np.ndarray,
+    *,
+    max_seed_count: int,
+) -> np.ndarray:
+    if len(candidate_indices) <= max_seed_count:
+        return candidate_indices
+    cam = np.asarray(cam_pos, dtype=np.float64).reshape(3)
+    pts = np.asarray(points, dtype=np.float64)
+    depths = np.linalg.norm(pts[candidate_indices] - cam.reshape(1, 3), axis=1)
+    ordered = candidate_indices[np.argsort(depths)]
+    sample_positions = np.linspace(0, len(ordered) - 1, max(1, int(max_seed_count))).round().astype(np.int64)
+    return np.unique(ordered[sample_positions])
+
+
+def _fused_selection_score(selection: FusedSelection) -> tuple[int, int, int, int]:
+    confidence_rank = {"none": 0, "low": 1, "medium": 2, "high": 3}.get(selection.confidence, 0)
+    reason_rank = 1 if selection.reason == "fused_frustum_and_planar_geometry" else 0
+    label_rank = 1 if selection.label in {"door", "window"} else 0
+    return confidence_rank, reason_rank, label_rank, int(selection.point_count)
 
 
 def should_highlight_fused(selection: FusedSelection) -> bool:

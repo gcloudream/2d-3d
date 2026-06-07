@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from core.door_window_fusion import (
+    extract_detection_region_from_bbox,
     fuse_detection_and_pointcloud,
     frustum_candidate_mask,
     should_highlight_fused,
@@ -67,6 +68,26 @@ class FusionTest(unittest.TestCase):
         self.assertEqual(fused.detection_index, 0)
         self.assertEqual(fused.label, "door")
         # The fused region is dominated by door points, not the wider wall slab.
+        door_hits = int(fused.mask[: len(self.door)].sum())
+        wall_hits = int(fused.mask[len(self.door):].sum())
+        self.assertGreater(door_hits, wall_hits)
+        self.assertTrue(should_highlight_fused(fused))
+
+    def test_extract_detection_region_from_bbox_finds_door_without_clicked_seed(self):
+        fused = extract_detection_region_from_bbox(
+            self.points,
+            0,
+            [self.detection],
+            self.cam,
+            self.R,
+            self.img_w,
+            self.img_h,
+            yaw_offset_deg=0.0,
+        )
+
+        self.assertEqual(fused.source, "fused")
+        self.assertEqual(fused.detection_index, 0)
+        self.assertEqual(fused.label, "door")
         door_hits = int(fused.mask[: len(self.door)].sum())
         wall_hits = int(fused.mask[len(self.door):].sum())
         self.assertGreater(door_hits, wall_hits)

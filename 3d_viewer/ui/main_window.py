@@ -15,7 +15,11 @@ from PySide6.QtWidgets import (
 from core.dataset import CameraPose, Dataset, find_default_dataset, load_dataset
 from core.detection_cache import find_detection_json
 from core.detection_runner import DETECTION_MODE_LABELS, run_detection_for_image
-from core.door_window_fusion import fuse_detection_and_pointcloud, should_highlight_fused
+from core.door_window_fusion import (
+    extract_detection_region_from_bbox,
+    fuse_detection_and_pointcloud,
+    should_highlight_fused,
+)
 from core.pointcloud_extract import (
     extract_planar_region_from_seed,
     should_highlight_planar_region,
@@ -79,6 +83,7 @@ class MainWindow(QMainWindow):
         self.scene = SceneView()
         self.scene.hover_changed.connect(self._on_hover)
         self.scene.point_clicked.connect(self._on_point_clicked)
+        self.scene.detection_clicked.connect(self._on_detection_clicked)
         self.cloud_scene = SceneView()
         self.cloud_scene.point_clicked.connect(self._on_cloud_point_clicked)
         self.editor = PanoAnnotationEditor(self.workspace)
@@ -617,6 +622,43 @@ class MainWindow(QMainWindow):
             img_w,
             img_h,
             yaw_offset_deg=yaw_offset,
+        )
+
+    def _on_detection_clicked(self, detection_index: int):
+        if not self.dataset or self.current_idx < 0:
+            return
+        if detection_index < 0 or detection_index >= len(self.current_detections):
+            return
+        pose = self.dataset.poses[self.current_idx]
+        img_w, img_h = self.current_image_size or (0, 0)
+        if img_w <= 0 or img_h <= 0:
+            return
+        R = rotation_from_angle(pose.roll, pose.pitch, pose.yaw)
+        yaw_offset = float(self.yaw_offset.currentData())
+        selection = extract_detection_region_from_bbox(
+            self.dataset.points,
+            int(detection_index),
+            self.current_detections,
+            pose.position,
+            R,
+            img_w,
+            img_h,
+            yaw_offset_deg=yaw_offset,
+        )
+        highlight = selection.mask if should_highlight_fused(selection) else None
+        effective_highlight = self._set_opening_candidate_from_extraction(-1, selection, highlight)
+        self._log_opening_selection_event("extract_opening_candidate", -1, selection, effective_highlight)
+        self.scene.set_selected_detection(selection.detection_index)
+        width = f"{selection.width_m:.2f}" if selection.width_m is not None else "—"
+        height = f"{selection.height_m:.2f}" if selection.height_m is not None else "—"
+        score = f"{selection.score:.3f}" if selection.score is not None else "—"
+        total = int(self._highlight_mask.sum()) if self._highlight_mask is not None else selection.point_count
+        self.lbl_detection.setText(
+            f"检测框提取 (框#{selection.detection_index} score={score})\n"
+            f"label: {selection.label} · confidence: {selection.confidence}\n"
+            f"this: {selection.point_count:,} · total: {total:,}\n"
+            f"size: {width} × {height} m\n"
+            f"reason: {selection.reason}"
         )
 
     def _load_detections(self, pose: CameraPose):

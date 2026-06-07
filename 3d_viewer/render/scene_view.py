@@ -17,7 +17,8 @@ from PySide6.QtOpenGL import QOpenGLWindow
 from PySide6.QtWidgets import QVBoxLayout, QWidget
 
 from core.dataset import CameraPose
-from core.projection import rotation_from_angle
+from core.door_window import match_points_to_detections
+from core.projection import project_points_to_panorama, rotation_from_angle
 from render.bbox_overlay import BboxOverlay
 from render.camera import Camera
 from render.orbit_camera import OrbitCamera
@@ -35,12 +36,14 @@ class SceneView(QWidget):
 
     hover_changed = Signal(object)  # 发出 dict 或 None
     point_clicked = Signal(int)
+    detection_clicked = Signal(int)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.gl_window = _SceneGLWindow()
         self.gl_window.hover_changed.connect(self.hover_changed)
         self.gl_window.point_clicked.connect(self.point_clicked)
+        self.gl_window.detection_clicked.connect(self.detection_clicked)
 
         self.container = QWidget.createWindowContainer(self.gl_window, self)
         self.container.setFocusPolicy(Qt.StrongFocus)
@@ -107,6 +110,7 @@ class SceneView(QWidget):
 class _SceneGLWindow(QOpenGLWindow):
     hover_changed = Signal(object)
     point_clicked = Signal(int)
+    detection_clicked = Signal(int)
 
     def __init__(self):
         fmt = QSurfaceFormat()
@@ -349,6 +353,10 @@ class _SceneGLWindow(QOpenGLWindow):
 
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton and self._pick_mode:
+            det_idx = self._pick_detection(e.position().toPoint())
+            if det_idx >= 0:
+                self.detection_clicked.emit(det_idx)
+                return
             idx = self._pick_point(e.position().toPoint(), max_dist_px=18)
             self.point_clicked.emit(idx)
             if idx >= 0:
@@ -456,3 +464,50 @@ class _SceneGLWindow(QOpenGLWindow):
             self._pc.points, mvp, w, h,
             pos.x(), pos.y(), max_dist_px=max_dist_px,
         )
+
+    def _pick_detection(self, pos: QPoint) -> int:
+        if self._global_view_mode or not self._show_bboxes:
+            return -1
+        if self._current_pose is None or not self._detections:
+            return -1
+        img_w, img_h = self._detection_image_size
+        if img_w <= 0 or img_h <= 0:
+            return -1
+        ray = self._mouse_world_ray(pos)
+        if ray is None:
+            return -1
+        R = rotation_from_angle(
+            self._current_pose.roll,
+            self._current_pose.pitch,
+            self._current_pose.yaw,
+        )
+        yaw_offset = self._pano.yaw_offset_deg if self._pano is not None else 0.0
+        uv = project_points_to_panorama(
+            (self._current_pose.position + ray).reshape(1, 3),
+            self._current_pose.position,
+            R,
+            img_w,
+            img_h,
+            yaw_offset_deg=yaw_offset,
+        )
+        matches = match_points_to_detections(uv, self._detections, float(img_w))
+        return int(matches.match_indices[0])
+
+    def _mouse_world_ray(self, pos: QPoint) -> np.ndarray | None:
+        w, h = self._logical_size()
+        if w <= 0 or h <= 0:
+            return None
+        aspect = w / h
+        ndc_x = (2.0 * float(pos.x()) / float(w)) - 1.0
+        ndc_y = 1.0 - (2.0 * float(pos.y()) / float(h))
+        tan_half_fov = np.tan(np.deg2rad(self.camera.fov_deg) / 2.0)
+        camera_dir = np.array([
+            ndc_x * tan_half_fov * aspect,
+            ndc_y * tan_half_fov,
+            -1.0,
+        ], dtype=np.float64)
+        camera_dir /= max(float(np.linalg.norm(camera_dir)), 1e-9)
+        view = self.camera.view_matrix().astype(np.float64)
+        world_dir = view[:3, :3].T @ camera_dir
+        world_dir /= max(float(np.linalg.norm(world_dir)), 1e-9)
+        return world_dir

@@ -18,7 +18,7 @@ sys.path.insert(0, str(ROOT))
 
 from PySide6.QtWidgets import QApplication
 
-from core.dataset import Dataset
+from core.dataset import CameraPose, Dataset
 from core.wall_openings import (
     WallOpening,
     append_wall_opening_event,
@@ -190,6 +190,60 @@ class MainWindowWallOpeningsTest(unittest.TestCase):
         win._clear_highlight()
 
         self.assertIsNone(win._last_opening_candidate)
+
+    def test_detection_click_runs_bbox_extraction_and_highlights_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            data_root = workspace / "scan"
+            data_root.mkdir()
+            dataset = Dataset(
+                data_root=data_root,
+                camera_file=data_root / "camera_pos.cam",
+                image_dir=data_root,
+                pointcloud_file=data_root / "cloud.las",
+                poses=[CameraPose("608.jpg", 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)],
+                points=np.asarray([
+                    [1.0, 0.0, 0.8],
+                    [1.0, 0.4, 1.0],
+                    [1.0, 0.8, 1.6],
+                ], dtype=np.float64),
+                colors=np.zeros((3, 3), dtype=np.uint8),
+                total_points=3,
+                sample_step=1,
+                pano_calibration=None,
+                pano_yaw_offset_deg=-90.0,
+            )
+            selection = SimpleNamespace(
+                mask=np.asarray([True, True, True]),
+                point_count=3,
+                confidence="high",
+                reason="fused_frustum_and_planar_geometry",
+                label="window",
+                source="fused",
+                detection_index=0,
+                score=0.9,
+                plane_point=np.asarray([1.0, 0.4, 1.0]),
+                plane_normal=np.asarray([1.0, 0.0, 0.0]),
+                width_m=0.8,
+                height_m=0.8,
+            )
+
+            with patch.object(MainWindow, "_load", lambda self: None):
+                win = MainWindow(workspace)
+            self.addCleanup(win.close)
+            win.dataset = dataset
+            win.current_idx = 0
+            win.current_detections = [{"label": "window", "score": 0.9, "bbox": [10, 10, 20, 20]}]
+            win.current_image_size = (100, 50)
+
+            with patch("ui.main_window.extract_detection_region_from_bbox", return_value=selection) as extract:
+                win._on_detection_clicked(0)
+
+            extract.assert_called_once()
+            self.assertEqual(extract.call_args.args[1], 0)
+            self.assertEqual(int(win._highlight_mask.sum()), 3)
+            self.assertEqual(win._last_opening_candidate["label"], "window")
+            self.assertEqual(win._last_opening_candidate["seed_index"], -1)
 
     def test_record_current_opening_uses_accumulated_highlight_in_supplement_mode(self):
         with tempfile.TemporaryDirectory() as tmp:
