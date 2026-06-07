@@ -9,7 +9,7 @@ from PySide6.QtCore import QObject, QThread, Qt, Signal
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QHBoxLayout, QLabel, QListWidget, QMainWindow,
     QMessageBox, QPushButton, QSlider, QSplitter, QStatusBar, QVBoxLayout, QWidget,
-    QComboBox, QStackedWidget,
+    QComboBox, QStackedWidget, QStyle,
 )
 
 from core.dataset import CameraPose, Dataset, find_default_dataset, load_dataset
@@ -28,6 +28,7 @@ from ui.scene_sync import (
     set_scene_pair_highlight_mask,
     set_scene_pair_point_size,
 )
+from wall_model_tool import WallModelWorkbench
 
 
 class DetectionWorker(QObject):
@@ -80,9 +81,26 @@ class MainWindow(QMainWindow):
         self.view_stack = QStackedWidget()
         self.view_stack.addWidget(self.normal_view)
         self.view_stack.addWidget(self.editor)
+        self.wall_model_view = WallModelWorkbench(self.workspace, max_points=300_000)
+        self.wall_model_view.set_back_button_visible(True)
+        self.wall_model_view.status_changed.connect(self._on_wall_model_status)
+        self.wall_model_view.back_requested.connect(self._show_main_view)
+        self.view_stack.addWidget(self.wall_model_view)
 
         self.list = QListWidget()
         self.list.currentRowChanged.connect(self._on_select)
+
+        self.btn_main_view = QPushButton("主视图")
+        self.btn_main_view.setCheckable(True)
+        self.btn_main_view.setChecked(True)
+        self.btn_main_view.setIcon(self.style().standardIcon(QStyle.SP_ComputerIcon))
+        self.btn_main_view.clicked.connect(self._show_main_view)
+
+        self.btn_wall_model = QPushButton("墙体建模")
+        self.btn_wall_model.setCheckable(True)
+        self.btn_wall_model.setIcon(self.style().standardIcon(QStyle.SP_FileDialogDetailedView))
+        self.btn_wall_model.setToolTip("打开墙体线图和 OBJ 生成工作台")
+        self.btn_wall_model.clicked.connect(self._show_wall_model)
 
         self.cb_pano = QCheckBox("显示全景")
         self.cb_pano.setChecked(True)
@@ -154,8 +172,15 @@ class MainWindow(QMainWindow):
         self._load()
 
     def _build_ui(self):
-        side = QWidget(); v = QVBoxLayout(side)
+        self.side_panel = QWidget()
+        v = QVBoxLayout(self.side_panel)
         v.setContentsMargins(8, 8, 8, 8); v.setSpacing(8)
+
+        workspace_nav = QHBoxLayout()
+        workspace_nav.setSpacing(6)
+        workspace_nav.addWidget(self.btn_main_view)
+        workspace_nav.addWidget(self.btn_wall_model)
+        v.addLayout(workspace_nav)
 
         v.addWidget(QLabel("Keyframes"))
         v.addWidget(self.list, 1)
@@ -194,7 +219,7 @@ class MainWindow(QMainWindow):
                           " · 1/2: 显隐全景/点云 · R: 重置"))
 
         sp = QSplitter(Qt.Horizontal)
-        sp.addWidget(self.view_stack); sp.addWidget(side)
+        sp.addWidget(self.view_stack); sp.addWidget(self.side_panel)
         sp.setSizes([1180, 320])
         self.setCentralWidget(sp)
 
@@ -496,6 +521,7 @@ class MainWindow(QMainWindow):
             return
         self.editor.load_image(image_path, self.current_detections)
         self.view_stack.setCurrentWidget(self.editor)
+        self._sync_workspace_buttons()
         self.statusBar().showMessage(
             "正在编辑当前全景框：拖拽画框，点击框选中，Delete 删除，编辑结束保存"
         )
@@ -508,7 +534,27 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"手工框已保存: {Path(path_text).name}")
 
     def _exit_annotation_editor(self):
+        self._show_main_view()
+
+    def _show_main_view(self):
+        self.side_panel.show()
         self.view_stack.setCurrentWidget(self.normal_view)
+        self._sync_workspace_buttons()
+        self.statusBar().showMessage("已切回点云主视图")
+
+    def _show_wall_model(self):
+        self.view_stack.setCurrentWidget(self.wall_model_view)
+        self.side_panel.hide()
+        self._sync_workspace_buttons()
+        self.statusBar().showMessage("已打开墙体建模工作台")
+
+    def _sync_workspace_buttons(self):
+        current = self.view_stack.currentWidget()
+        self.btn_main_view.setChecked(current is self.normal_view)
+        self.btn_wall_model.setChecked(current is self.wall_model_view)
+
+    def _on_wall_model_status(self, message: str):
+        self.statusBar().showMessage(message)
 
     def _on_detection_finished(self, path_text: str):
         if not self.dataset or self.current_idx < 0:
