@@ -237,10 +237,11 @@ class MainWindowWallOpeningsTest(unittest.TestCase):
             win.current_image_size = (100, 50)
 
             with patch("ui.main_window.extract_detection_region_from_bbox", return_value=selection) as extract:
-                win._on_detection_clicked(0)
+                win._on_detection_clicked(0, 12.5, 18.5)
 
             extract.assert_called_once()
             self.assertEqual(extract.call_args.args[1], 0)
+            self.assertEqual(extract.call_args.kwargs["click_uv"], (12.5, 18.5))
             self.assertEqual(int(win._highlight_mask.sum()), 3)
             self.assertEqual(win._last_opening_candidate["label"], "window")
             self.assertEqual(win._last_opening_candidate["seed_index"], -1)

@@ -36,7 +36,7 @@ class SceneView(QWidget):
 
     hover_changed = Signal(object)  # 发出 dict 或 None
     point_clicked = Signal(int)
-    detection_clicked = Signal(int)
+    detection_clicked = Signal(int, float, float)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -110,7 +110,7 @@ class SceneView(QWidget):
 class _SceneGLWindow(QOpenGLWindow):
     hover_changed = Signal(object)
     point_clicked = Signal(int)
-    detection_clicked = Signal(int)
+    detection_clicked = Signal(int, float, float)
 
     def __init__(self):
         fmt = QSurfaceFormat()
@@ -353,9 +353,9 @@ class _SceneGLWindow(QOpenGLWindow):
 
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton and self._pick_mode:
-            det_idx = self._pick_detection(e.position().toPoint())
+            det_idx, click_u, click_v = self._pick_detection_hit(e.position().toPoint())
             if det_idx >= 0:
-                self.detection_clicked.emit(det_idx)
+                self.detection_clicked.emit(det_idx, click_u, click_v)
                 return
             idx = self._pick_point(e.position().toPoint(), max_dist_px=18)
             self.point_clicked.emit(idx)
@@ -466,16 +466,19 @@ class _SceneGLWindow(QOpenGLWindow):
         )
 
     def _pick_detection(self, pos: QPoint) -> int:
+        return self._pick_detection_hit(pos)[0]
+
+    def _pick_detection_hit(self, pos: QPoint) -> tuple[int, float, float]:
         if self._global_view_mode or not self._show_bboxes:
-            return -1
+            return -1, float("nan"), float("nan")
         if self._current_pose is None or not self._detections:
-            return -1
+            return -1, float("nan"), float("nan")
         img_w, img_h = self._detection_image_size
         if img_w <= 0 or img_h <= 0:
-            return -1
+            return -1, float("nan"), float("nan")
         ray = self._mouse_world_ray(pos)
         if ray is None:
-            return -1
+            return -1, float("nan"), float("nan")
         R = rotation_from_angle(
             self._current_pose.roll,
             self._current_pose.pitch,
@@ -491,7 +494,10 @@ class _SceneGLWindow(QOpenGLWindow):
             yaw_offset_deg=yaw_offset,
         )
         matches = match_points_to_detections(uv, self._detections, float(img_w))
-        return int(matches.match_indices[0])
+        det_idx = int(matches.match_indices[0])
+        if det_idx < 0:
+            return -1, float("nan"), float("nan")
+        return det_idx, float(uv[0, 0]), float(uv[0, 1])
 
     def _mouse_world_ray(self, pos: QPoint) -> np.ndarray | None:
         w, h = self._logical_size()

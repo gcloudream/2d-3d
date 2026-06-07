@@ -93,6 +93,53 @@ class FusionTest(unittest.TestCase):
         self.assertGreater(door_hits, wall_hits)
         self.assertTrue(should_highlight_fused(fused))
 
+    def test_extract_detection_region_from_bbox_prefers_region_near_clicked_uv(self):
+        left = _vertical_patch(width=0.7, height=1.0, y=2.0)
+        left[:, 0] -= 0.8
+        right = _vertical_patch(width=0.7, height=1.0, y=2.0)
+        right[:, 0] += 0.8
+        points = np.vstack([left, right])
+        uv = project_points_to_panorama(
+            points, self.cam, self.R, self.img_w, self.img_h, yaw_offset_deg=0.0
+        )
+        x1, y1 = uv.min(axis=0)
+        x2, y2 = uv.max(axis=0)
+        detection = {
+            "label": "window",
+            "score": 0.95,
+            "bbox": [x1 - 4.0, y1 - 4.0, x2 + 4.0, y2 + 4.0],
+        }
+        left_uv = tuple(np.median(uv[: len(left)], axis=0))
+        right_uv = tuple(np.median(uv[len(left):], axis=0))
+
+        selected_left = extract_detection_region_from_bbox(
+            points,
+            0,
+            [detection],
+            self.cam,
+            self.R,
+            self.img_w,
+            self.img_h,
+            yaw_offset_deg=0.0,
+            click_uv=left_uv,
+            max_seed_count=6,
+        )
+        selected_right = extract_detection_region_from_bbox(
+            points,
+            0,
+            [detection],
+            self.cam,
+            self.R,
+            self.img_w,
+            self.img_h,
+            yaw_offset_deg=0.0,
+            click_uv=right_uv,
+            max_seed_count=6,
+        )
+
+        self.assertGreater(selected_left.mask[: len(left)].sum(), selected_left.mask[len(left):].sum())
+        self.assertGreater(selected_right.mask[len(left):].sum(), selected_right.mask[: len(left)].sum())
+
     def test_fusion_reports_seed_outside_any_frustum(self):
         # A seed on the far wall, projected outside the (door-sized) bbox edges.
         far_seed = len(self.door)  # first wall point (a wide-slab corner)

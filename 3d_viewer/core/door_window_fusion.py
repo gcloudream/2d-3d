@@ -200,6 +200,7 @@ def extract_detection_region_from_bbox(
     img_h: int,
     yaw_offset_deg: float = 0.0,
     *,
+    click_uv: tuple[float, float] | None = None,
     max_seed_count: int = DEFAULT_AUTO_SEED_COUNT,
 ) -> FusedSelection:
     """Extract a detection's best door/window region without a manually clicked seed."""
@@ -211,6 +212,10 @@ def extract_detection_region_from_bbox(
         return _empty(n, "invalid_image_size")
 
     detection = detections[detection_index]
+    uv = project_points_to_panorama(
+        pts, cam_pos, R_pano, img_w, img_h, yaw_offset_deg=yaw_offset_deg
+    )
+    target_uv = _valid_click_uv(click_uv, float(img_w))
     candidate = frustum_candidate_mask(
         pts,
         cam_pos,
@@ -232,6 +237,9 @@ def extract_detection_region_from_bbox(
         candidate_indices,
         cam_pos,
         max_seed_count=max_seed_count,
+        uv=uv,
+        click_uv=target_uv,
+        pano_w=float(img_w),
     ):
         selection = fuse_detection_and_pointcloud(
             pts,
@@ -244,7 +252,11 @@ def extract_detection_region_from_bbox(
             yaw_offset_deg=yaw_offset_deg,
         )
         selection = replace(selection, detection_index=int(detection_index))
-        if best is None or _fused_selection_score(selection) > _fused_selection_score(best):
+        score = _fused_selection_score(selection, uv=uv, click_uv=target_uv, pano_w=float(img_w))
+        best_score = None if best is None else _fused_selection_score(
+            best, uv=uv, click_uv=target_uv, pano_w=float(img_w)
+        )
+        if best_score is None or score > best_score:
             best = selection
 
     if best is None or best.point_count <= 0:
@@ -258,6 +270,9 @@ def _auto_seed_indices(
     cam_pos: np.ndarray,
     *,
     max_seed_count: int,
+    uv: np.ndarray | None = None,
+    click_uv: tuple[float, float] | None = None,
+    pano_w: float | None = None,
 ) -> np.ndarray:
     if len(candidate_indices) <= max_seed_count:
         return candidate_indices
@@ -265,15 +280,98 @@ def _auto_seed_indices(
     pts = np.asarray(points, dtype=np.float64)
     depths = np.linalg.norm(pts[candidate_indices] - cam.reshape(1, 3), axis=1)
     ordered = candidate_indices[np.argsort(depths)]
-    sample_positions = np.linspace(0, len(ordered) - 1, max(1, int(max_seed_count))).round().astype(np.int64)
-    return np.unique(ordered[sample_positions])
+    seed_budget = max(1, int(max_seed_count))
+    click_order = np.asarray([], dtype=np.int64)
+    if uv is not None and click_uv is not None and pano_w is not None:
+        distances = _panorama_pixel_distances(uv[candidate_indices], click_uv, float(pano_w))
+        nearest = candidate_indices[np.argsort(distances)]
+        click_count = max(1, seed_budget // 2)
+        click_order = nearest[:click_count]
+
+    depth_count = max(1, seed_budget - len(click_order))
+    sample_positions = np.linspace(0, len(ordered) - 1, depth_count).round().astype(np.int64)
+    depth_order = ordered[sample_positions]
+    combined = np.concatenate([click_order, depth_order])
+    return _unique_preserve_order(combined)[:seed_budget]
 
 
-def _fused_selection_score(selection: FusedSelection) -> tuple[int, int, int, int]:
+def _fused_selection_score(
+    selection: FusedSelection,
+    *,
+    uv: np.ndarray | None = None,
+    click_uv: tuple[float, float] | None = None,
+    pano_w: float | None = None,
+) -> tuple[int, int, int, int, int, int]:
     confidence_rank = {"none": 0, "low": 1, "medium": 2, "high": 3}.get(selection.confidence, 0)
     reason_rank = 1 if selection.reason == "fused_frustum_and_planar_geometry" else 0
     label_rank = 1 if selection.label in {"door", "window"} else 0
-    return confidence_rank, reason_rank, label_rank, int(selection.point_count)
+    click_center_rank, click_spread_rank = _selection_click_ranks(
+        selection, uv=uv, click_uv=click_uv, pano_w=pano_w
+    )
+    return (
+        confidence_rank,
+        reason_rank,
+        label_rank,
+        click_center_rank,
+        click_spread_rank,
+        int(selection.point_count),
+    )
+
+
+def _valid_click_uv(click_uv: tuple[float, float] | None, pano_w: float) -> tuple[float, float] | None:
+    if click_uv is None:
+        return None
+    arr = np.asarray(click_uv, dtype=np.float64).reshape(-1)
+    if len(arr) < 2 or not np.isfinite(arr[:2]).all():
+        return None
+    u = float(arr[0])
+    if pano_w > 0:
+        u %= float(pano_w)
+    return u, float(arr[1])
+
+
+def _panorama_pixel_distances(
+    uv: np.ndarray,
+    click_uv: tuple[float, float],
+    pano_w: float,
+) -> np.ndarray:
+    pts_uv = np.asarray(uv, dtype=np.float64)
+    target_u, target_v = click_uv
+    dx = np.abs(pts_uv[:, 0] - float(target_u))
+    if pano_w > 0:
+        dx = np.minimum(dx, float(pano_w) - dx)
+    dy = pts_uv[:, 1] - float(target_v)
+    return np.hypot(dx, dy)
+
+
+def _selection_click_ranks(
+    selection: FusedSelection,
+    *,
+    uv: np.ndarray | None,
+    click_uv: tuple[float, float] | None,
+    pano_w: float | None,
+) -> tuple[int, int]:
+    if uv is None or click_uv is None or pano_w is None:
+        return 0, 0
+    mask = np.asarray(selection.mask, dtype=bool)
+    if len(mask) != len(uv) or not mask.any():
+        return 0, 0
+    distances = _panorama_pixel_distances(uv[mask], click_uv, float(pano_w))
+    median_dist = float(np.median(distances))
+    spread_dist = float(np.percentile(distances, 90))
+    return -int(round(median_dist * 1000.0)), -int(round(spread_dist * 100.0))
+
+
+def _unique_preserve_order(values: np.ndarray) -> np.ndarray:
+    seen: set[int] = set()
+    ordered: list[int] = []
+    for value in values:
+        item = int(value)
+        if item in seen:
+            continue
+        seen.add(item)
+        ordered.append(item)
+    return np.asarray(ordered, dtype=np.int64)
 
 
 def should_highlight_fused(selection: FusedSelection) -> bool:

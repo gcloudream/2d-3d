@@ -624,7 +624,12 @@ class MainWindow(QMainWindow):
             yaw_offset_deg=yaw_offset,
         )
 
-    def _on_detection_clicked(self, detection_index: int):
+    def _on_detection_clicked(
+        self,
+        detection_index: int,
+        click_u: float | None = None,
+        click_v: float | None = None,
+    ):
         if not self.dataset or self.current_idx < 0:
             return
         if detection_index < 0 or detection_index >= len(self.current_detections):
@@ -635,6 +640,9 @@ class MainWindow(QMainWindow):
             return
         R = rotation_from_angle(pose.roll, pose.pitch, pose.yaw)
         yaw_offset = float(self.yaw_offset.currentData())
+        click_uv = None
+        if click_u is not None and click_v is not None:
+            click_uv = (float(click_u), float(click_v))
         selection = extract_detection_region_from_bbox(
             self.dataset.points,
             int(detection_index),
@@ -644,6 +652,7 @@ class MainWindow(QMainWindow):
             img_w,
             img_h,
             yaw_offset_deg=yaw_offset,
+            click_uv=click_uv,
         )
         highlight = selection.mask if should_highlight_fused(selection) else None
         effective_highlight = self._set_opening_candidate_from_extraction(-1, selection, highlight)
