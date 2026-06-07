@@ -155,6 +155,32 @@ class MainWindowWallOpeningsTest(unittest.TestCase):
             self.assertTrue(wall_openings_path(workspace, other_root).exists())
             self.assertTrue(wall_opening_events_path(workspace, other_root).exists())
 
+    def test_load_defaults_panorama_yaw_offset_to_minus_90(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            data_root = workspace / "scan"
+            data_root.mkdir()
+            dataset = Dataset(
+                data_root=data_root,
+                camera_file=data_root / "camera_pos.cam",
+                image_dir=data_root,
+                pointcloud_file=data_root / "cloud.las",
+                poses=[],
+                points=np.asarray([[1.0, 0.0, 0.8]], dtype=np.float64),
+                colors=np.zeros((1, 3), dtype=np.uint8),
+                total_points=1,
+                sample_step=1,
+                pano_calibration=SimpleNamespace(default_yaw_offset_deg=-92.819),
+                pano_yaw_offset_deg=-92.819,
+            )
+
+            with patch("ui.main_window.find_default_dataset", return_value=object()), \
+                patch("ui.main_window.load_dataset", return_value=dataset):
+                win = MainWindow(workspace)
+            self.addCleanup(win.close)
+
+            self.assertAlmostEqual(float(win.yaw_offset.currentData()), -90.0)
+
     def test_clear_highlight_clears_opening_candidate(self):
         with patch.object(MainWindow, "_load", lambda self: None):
             win = MainWindow(ROOT.parent)

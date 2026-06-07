@@ -37,6 +37,9 @@ from ui.scene_sync import (
 from wall_model_tool import WallModelWorkbench
 
 
+DEFAULT_PANORAMA_YAW_OFFSET_DEG = -90.0
+
+
 class DetectionWorker(QObject):
     finished = Signal(str)
     failed = Signal(str)
@@ -160,7 +163,7 @@ class MainWindow(QMainWindow):
         for label, value in [
             ("0°", 0.0),
             ("+90°", 90.0),
-            ("-90°", -90.0),
+            ("-90°", DEFAULT_PANORAMA_YAW_OFFSET_DEG),
             ("180°", 180.0),
         ]:
             self.yaw_offset.addItem(label, value)
@@ -247,7 +250,8 @@ class MainWindow(QMainWindow):
 
         d = self.dataset
         clear_wall_opening_session_files(self.workspace, d.data_root)
-        self._set_yaw_offset_value(d.pano_yaw_offset_deg)
+        self._ensure_yaw_offset_value(d.pano_yaw_offset_deg)
+        self._set_yaw_offset_value(DEFAULT_PANORAMA_YAW_OFFSET_DEG)
         self.scene.set_world_points(d.points, d.colors)
         self.cloud_scene.set_world_points(d.points, d.colors)
         self.scene.set_pano_yaw_offset(float(self.yaw_offset.currentData()))
@@ -364,6 +368,13 @@ class MainWindow(QMainWindow):
                 return
         self.yaw_offset.insertItem(0, f"标定 {degrees:+.1f}°", degrees)
         self.yaw_offset.setCurrentIndex(0)
+
+    def _ensure_yaw_offset_value(self, degrees: float):
+        degrees = float(degrees)
+        for i in range(self.yaw_offset.count()):
+            if abs(float(self.yaw_offset.itemData(i)) - degrees) < 1e-6:
+                return
+        self.yaw_offset.insertItem(0, f"标定 {degrees:+.1f}°", degrees)
 
     def _set_pointcloud_pick_mode(self, on: bool):
         # Pure/fused point-cloud extraction works from BOTH views: enable pick
