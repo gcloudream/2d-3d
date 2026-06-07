@@ -38,6 +38,12 @@ DEFAULT_RETURN_WALL_TOUCH_TOLERANCE_M = 0.35
 DEFAULT_BOUNDARY_NOTCH_TOLERANCE_M = 0.75
 DEFAULT_MIN_RETURN_WALL_POINT_COUNT = 180
 DEFAULT_MIN_RETURN_WALL_HEIGHT_SPAN_M = 1.2
+OBJ_MATERIAL_COLORS = {
+    "wall": (0.62, 0.78, 0.82, 1.0),
+    "opening_window": (0.05, 0.88, 0.36, 1.0),
+    "opening_door": (1.0, 0.58, 0.08, 1.0),
+    "opening": (0.95, 0.86, 0.16, 1.0),
+}
 
 
 @dataclass(frozen=True)
@@ -234,14 +240,17 @@ def generate_wall_model(
     topdown_preview_path = out_dir / f"{stem}_walls_topdown.png"
 
     vertices, faces = wall_segments_to_mesh(segments, wall_thickness_m=wall_thickness_m)
-    marker_vertices, marker_faces = opening_markers_to_mesh(
-        opening_markers,
-        wall_thickness_m=wall_thickness_m,
-    )
-    marker_base = len(vertices)
-    vertices.extend(marker_vertices)
-    faces.extend(tuple(index + marker_base for index in face) for face in marker_faces)
-    write_obj(obj_path, vertices, faces)
+    face_materials = ["wall"] * len(faces)
+    for marker in opening_markers:
+        marker_vertices, marker_faces = opening_markers_to_mesh(
+            [marker],
+            wall_thickness_m=wall_thickness_m,
+        )
+        marker_base = len(vertices)
+        vertices.extend(marker_vertices)
+        faces.extend(tuple(index + marker_base for index in face) for face in marker_faces)
+        face_materials.extend([_opening_marker_material(marker.label)] * len(marker_faces))
+    write_obj(obj_path, vertices, faces, face_materials=face_materials)
     _write_metadata(
         metadata_path,
         obj_path,
@@ -949,6 +958,15 @@ def _is_projectable_unmatched_opening(opening: WallOpening) -> bool:
     return confidence == "high" or reason.startswith(("accepted_", "fused_"))
 
 
+def _opening_marker_material(label: str) -> str:
+    normalized = (label or "").lower()
+    if normalized == "window":
+        return "opening_window"
+    if normalized == "door":
+        return "opening_door"
+    return "opening"
+
+
 def _append_marker_strip_box(
     vertices: list[tuple[float, float, float]],
     faces: list[tuple[int, int, int, int]],
@@ -1024,13 +1042,48 @@ def write_obj(
     path: Path,
     vertices: list[tuple[float, float, float]],
     faces: list[tuple[int, int, int, int]],
+    *,
+    face_materials: Iterable[str] | None = None,
 ) -> None:
-    lines = ["# prototype wall model generated from point-cloud wall evidence"]
+    material_names = list(face_materials) if face_materials is not None else ["wall"] * len(faces)
+    if len(material_names) != len(faces):
+        raise ValueError("face_materials must have the same length as faces")
+    material_names = [
+        name if name in OBJ_MATERIAL_COLORS else "opening"
+        for name in material_names
+    ]
+    mtl_path = path.with_suffix(".mtl")
+    _write_mtl(mtl_path, OBJ_MATERIAL_COLORS)
+
+    lines = [
+        "# prototype wall model generated from point-cloud wall evidence",
+        f"mtllib {mtl_path.name}",
+    ]
     for x, y, z in vertices:
         lines.append(f"v {x:.5f} {y:.5f} {z:.5f}")
-    for face in faces:
+    current_material = None
+    for material, face in zip(material_names, faces):
+        if material != current_material:
+            lines.append(f"usemtl {material}")
+            current_material = material
         lines.append("f " + " ".join(str(i) for i in face))
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _write_mtl(path: Path, materials: dict[str, tuple[float, float, float, float]]) -> None:
+    lines = ["# materials for wall/opening OBJ preview"]
+    for name, color in materials.items():
+        r, g, b = color[:3]
+        lines.extend([
+            f"newmtl {name}",
+            f"Ka {r:.4f} {g:.4f} {b:.4f}",
+            f"Kd {r:.4f} {g:.4f} {b:.4f}",
+            "Ks 0.0800 0.0800 0.0800",
+            "Ns 24.0000",
+            "illum 2",
+            "",
+        ])
+    path.write_text("\n".join(lines), encoding="utf-8")
 
 
 def render_wall_model_topdown_preview(

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 import sys
 from pathlib import Path
 
@@ -31,7 +32,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.dataset import Dataset, find_default_dataset, load_dataset
-from core.wall_model import WallModelResult, generate_wall_model
+from core.wall_model import OBJ_MATERIAL_COLORS, WallModelResult, generate_wall_model
 from core.wall_openings import load_wall_openings
 from render.orbit_camera import OrbitCamera
 
@@ -42,17 +43,20 @@ _VERT_SRC = """
 #version 330
 uniform mat4 mvp;
 in vec3 in_pos;
+in vec4 in_color;
+out vec4 v_color;
 void main() {
+    v_color = in_color;
     gl_Position = mvp * vec4(in_pos, 1.0);
 }
 """
 
 _FRAG_SRC = """
 #version 330
-uniform vec4 color;
+in vec4 v_color;
 out vec4 frag;
 void main() {
-    frag = color;
+    frag = v_color;
 }
 """
 
@@ -81,24 +85,44 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def load_obj_triangles(path: Path) -> np.ndarray:
+@dataclass(frozen=True)
+class ObjTriangleMesh:
+    triangles: np.ndarray
+    colors: np.ndarray
+
+
+def load_obj_triangle_mesh(path: Path) -> ObjTriangleMesh:
     vertices: list[tuple[float, float, float]] = []
     triangles: list[tuple[float, float, float]] = []
+    colors: list[tuple[float, float, float, float]] = []
+    current_material = "wall"
     for raw in Path(path).read_text(encoding="utf-8").splitlines():
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
         parts = line.split()
+        if parts[0] == "usemtl" and len(parts) >= 2:
+            current_material = parts[1]
+            continue
         if parts[0] == "v" and len(parts) >= 4:
             vertices.append((float(parts[1]), float(parts[2]), float(parts[3])))
             continue
         if parts[0] != "f" or len(parts) < 4:
             continue
+        material_color = OBJ_MATERIAL_COLORS.get(current_material, OBJ_MATERIAL_COLORS["wall"])
         indices = [_parse_face_index(token, len(vertices)) for token in parts[1:]]
         for i in range(1, len(indices) - 1):
             for index in (indices[0], indices[i], indices[i + 1]):
                 triangles.append(vertices[index])
-    return np.asarray(triangles, dtype=np.float32).reshape((-1, 3))
+                colors.append(material_color)
+    return ObjTriangleMesh(
+        triangles=np.asarray(triangles, dtype=np.float32).reshape((-1, 3)),
+        colors=np.asarray(colors, dtype=np.float32).reshape((-1, 4)),
+    )
+
+
+def load_obj_triangles(path: Path) -> np.ndarray:
+    return load_obj_triangle_mesh(path).triangles
 
 
 def _parse_face_index(token: str, vertex_count: int) -> int:
@@ -151,26 +175,26 @@ class _ObjModelGLWindow(QOpenGLWindow):
         self._edge_vbo: moderngl.Buffer | None = None
         self._edge_vao: moderngl.VertexArray | None = None
         self._triangles: np.ndarray | None = None
-        self._pending_triangles: np.ndarray | None = None
+        self._pending_mesh: ObjTriangleMesh | None = None
         self.show_mesh_edges = True
         self._dragging = False
         self._last_pos = QPoint()
 
     def load_obj(self, path: Path):
-        triangles = load_obj_triangles(path)
+        mesh = load_obj_triangle_mesh(path)
         if self._ctx is None:
-            self._pending_triangles = triangles
+            self._pending_mesh = mesh
             return
-        self._upload(triangles)
+        self._upload(mesh)
         self.update()
 
     def initializeGL(self):
         self._ctx = moderngl.create_context()
         self._ctx.enable(moderngl.DEPTH_TEST)
         self._prog = self._ctx.program(vertex_shader=_VERT_SRC, fragment_shader=_FRAG_SRC)
-        if self._pending_triangles is not None:
-            self._upload(self._pending_triangles)
-            self._pending_triangles = None
+        if self._pending_mesh is not None:
+            self._upload(self._pending_mesh)
+            self._pending_mesh = None
 
     def resizeGL(self, w: int, h: int):
         if self._ctx is not None:
@@ -187,10 +211,8 @@ class _ObjModelGLWindow(QOpenGLWindow):
             return
         mvp = self.camera.proj_matrix(logical_w / logical_h) @ self.camera.view_matrix()
         self._prog["mvp"].write(mvp.T.tobytes())
-        self._prog["color"].value = (0.68, 0.78, 0.82, 1.0)
         self._vao.render(mode=moderngl.TRIANGLES)
         if self.show_mesh_edges and self._edge_vao is not None:
-            self._prog["color"].value = (0.05, 0.08, 0.09, 1.0)
             self._ctx.disable(moderngl.DEPTH_TEST)
             self._edge_vao.render(mode=moderngl.LINES)
             self._ctx.enable(moderngl.DEPTH_TEST)
@@ -226,18 +248,24 @@ class _ObjModelGLWindow(QOpenGLWindow):
             return
         super().keyPressEvent(event)
 
-    def _upload(self, triangles: np.ndarray):
+    def _upload(self, mesh: ObjTriangleMesh):
         self._release_buffers()
-        data = np.ascontiguousarray(np.asarray(triangles, dtype=np.float32).reshape((-1, 3)))
-        self._triangles = data
-        if len(data) == 0 or self._ctx is None or self._prog is None:
+        positions = np.asarray(mesh.triangles, dtype=np.float32).reshape((-1, 3))
+        colors = np.asarray(mesh.colors, dtype=np.float32).reshape((-1, 4))
+        if len(colors) != len(positions):
+            colors = np.tile(np.asarray(OBJ_MATERIAL_COLORS["wall"], dtype=np.float32), (len(positions), 1))
+        self._triangles = positions
+        if len(positions) == 0 or self._ctx is None or self._prog is None:
             return
-        self.camera.fit_to_points(data)
+        self.camera.fit_to_points(positions)
+        data = np.ascontiguousarray(np.column_stack([positions, colors]).astype(np.float32))
         self._vbo = self._ctx.buffer(data.tobytes())
-        self._vao = self._ctx.simple_vertex_array(self._prog, self._vbo, "in_pos")
-        edges = _triangle_edges(data)
-        self._edge_vbo = self._ctx.buffer(edges.tobytes())
-        self._edge_vao = self._ctx.simple_vertex_array(self._prog, self._edge_vbo, "in_pos")
+        self._vao = self._ctx.vertex_array(self._prog, [(self._vbo, "3f 4f", "in_pos", "in_color")])
+        edges = _triangle_edges(positions)
+        edge_colors = np.tile(np.asarray((0.05, 0.08, 0.09, 1.0), dtype=np.float32), (len(edges), 1))
+        edge_data = np.ascontiguousarray(np.column_stack([edges, edge_colors]).astype(np.float32))
+        self._edge_vbo = self._ctx.buffer(edge_data.tobytes())
+        self._edge_vao = self._ctx.vertex_array(self._prog, [(self._edge_vbo, "3f 4f", "in_pos", "in_color")])
 
     def _release_buffers(self):
         for obj in (self._vao, self._edge_vao, self._vbo, self._edge_vbo):

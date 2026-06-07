@@ -623,6 +623,49 @@ class WallModelTest(unittest.TestCase):
             self.assertEqual(payload["projected_opening_count"], 0)
             self.assertEqual(result.projected_opening_count, 0)
             self.assertEqual(payload["opening_markers"][0]["opening_id"], "window-0001")
+            obj_text = result.obj_path.read_text(encoding="utf-8")
+            mtl_path = result.obj_path.with_suffix(".mtl")
+            self.assertTrue(mtl_path.exists())
+            self.assertIn(f"mtllib {mtl_path.name}", obj_text)
+            self.assertIn("usemtl wall", obj_text)
+            self.assertIn("usemtl opening_window", obj_text)
+            mtl_text = mtl_path.read_text(encoding="utf-8")
+            self.assertIn("newmtl wall", mtl_text)
+            self.assertIn("newmtl opening_window", mtl_text)
+
+    def test_obj_loader_uses_material_colors_for_opening_faces(self):
+        from wall_model_tool import OBJ_MATERIAL_COLORS, load_obj_triangle_mesh
+
+        with tempfile.TemporaryDirectory() as tmp:
+            obj_path = Path(tmp) / "colored.obj"
+            obj_path.write_text(
+                "\n".join(
+                    [
+                        "v 0 0 0",
+                        "v 1 0 0",
+                        "v 1 1 0",
+                        "v 0 1 0",
+                        "v 0 0 1",
+                        "v 1 0 1",
+                        "v 1 1 1",
+                        "v 0 1 1",
+                        "usemtl wall",
+                        "f 1 2 3 4",
+                        "usemtl opening_window",
+                        "f 5 6 7 8",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            mesh = load_obj_triangle_mesh(obj_path)
+
+            self.assertEqual(mesh.triangles.shape, (12, 3))
+            self.assertEqual(mesh.colors.shape, (12, 4))
+            self.assertTrue(np.allclose(mesh.colors[0], OBJ_MATERIAL_COLORS["wall"]))
+            self.assertTrue(np.allclose(mesh.colors[-1], OBJ_MATERIAL_COLORS["opening_window"]))
+            self.assertFalse(np.allclose(mesh.colors[0], mesh.colors[-1]))
 
     def test_generate_wall_model_projects_reliable_unmatched_opening_metadata(self):
         from core.wall_openings import WallOpening
