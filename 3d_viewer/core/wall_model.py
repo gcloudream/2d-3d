@@ -884,6 +884,8 @@ def render_wall_model_topdown_preview(
     x_min: float,
     y_min: float,
     resolution_m: float,
+    *,
+    opening_markers: list[WallOpeningMarker] | None = None,
 ) -> Image.Image:
     density = np.log1p(np.asarray(grid, dtype=np.float32))
     if float(density.max()) > 0.0:
@@ -899,6 +901,20 @@ def render_wall_model_topdown_preview(
         x2 = (seg.x2 - x_min) / resolution_m
         y2 = height - 1 - (seg.y2 - y_min) / resolution_m
         draw.line((x1, y1, x2, y2), fill=(255, 70, 40), width=3)
+    for marker in opening_markers or []:
+        color = (40, 230, 110) if marker.label == "window" else (255, 205, 40)
+        if marker.orientation == "vertical":
+            x = (marker.wall_coord - x_min) / resolution_m
+            y1 = height - 1 - (marker.axis_min - y_min) / resolution_m
+            y2 = height - 1 - (marker.axis_max - y_min) / resolution_m
+            draw.line((x, y1, x, y2), fill=color, width=7)
+            draw.line((x, y1, x, y2), fill=(10, 20, 15), width=2)
+        else:
+            x1 = (marker.axis_min - x_min) / resolution_m
+            x2 = (marker.axis_max - x_min) / resolution_m
+            y = height - 1 - (marker.wall_coord - y_min) / resolution_m
+            draw.line((x1, y, x2, y), fill=color, width=7)
+            draw.line((x1, y, x2, y), fill=(10, 20, 15), width=2)
     return image
 
 

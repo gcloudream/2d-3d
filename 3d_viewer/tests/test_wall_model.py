@@ -439,6 +439,39 @@ class WallModelTest(unittest.TestCase):
         self.assertEqual(unmatched[0]["id"], "door-0001")
         self.assertEqual(unmatched[0]["reason"], "no_matching_wall_segment")
 
+    def test_topdown_preview_draws_opening_marker(self):
+        from core.wall_model import WallOpeningMarker, render_wall_model_topdown_preview
+
+        grid = np.zeros((80, 80), dtype=np.uint8)
+        wall_mask = np.zeros_like(grid, dtype=bool)
+        segment = WallSegment("vertical", 1.0, 0.0, 1.0, 3.0, 0.0, 2.6, 3.0, 100, 2.6)
+        marker = WallOpeningMarker(
+            opening_id="window-0001",
+            label="window",
+            segment_index=0,
+            orientation="vertical",
+            wall_coord=1.0,
+            axis_min=1.0,
+            axis_max=1.5,
+            z_min=0.9,
+            z_max=1.5,
+            side=1.0,
+        )
+
+        image = render_wall_model_topdown_preview(
+            grid,
+            wall_mask,
+            [segment],
+            x_min=0.0,
+            y_min=0.0,
+            resolution_m=0.05,
+            opening_markers=[marker],
+        )
+
+        pixels = np.asarray(image)
+        green_pixels = (pixels[:, :, 1] > 180) & (pixels[:, :, 0] < 80)
+        self.assertTrue(green_pixels.any())
+
     def test_generates_wall_model_artifacts_for_synthetic_room(self):
         xs = np.linspace(0.0, 4.0, 45)
         ys = np.linspace(0.0, 3.0, 35)
