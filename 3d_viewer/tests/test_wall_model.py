@@ -370,6 +370,75 @@ class WallModelTest(unittest.TestCase):
         self.assertEqual(len(vertices), 8)
         self.assertEqual(len(faces), 6)
 
+    def test_matches_wall_opening_to_vertical_segment(self):
+        from core.wall_openings import WallOpening
+        from core.wall_model import match_wall_openings_to_segments
+
+        wall = WallSegment("vertical", 1.0, 0.0, 1.0, 3.0, 0.0, 2.6, 3.0, 100, 2.6)
+        opening = WallOpening(
+            id="window-0001",
+            label="window",
+            source_image="608.jpg",
+            seed_index=1,
+            point_count=20,
+            confidence="high",
+            reason="accepted_vertical_planar_region",
+            center=(1.05, 1.2, 1.2),
+            normal=(1.0, 0.0, 0.0),
+            bbox_min=(1.02, 0.8, 0.9),
+            bbox_max=(1.08, 1.6, 1.5),
+            width_m=0.8,
+            height_m=0.6,
+            z_min=0.9,
+            z_max=1.5,
+            detection_index=-1,
+            score=None,
+        )
+
+        matched, unmatched = match_wall_openings_to_segments([opening], [wall])
+
+        self.assertEqual(len(matched), 1)
+        self.assertEqual(unmatched, [])
+        self.assertEqual(matched[0].opening_id, "window-0001")
+        self.assertEqual(matched[0].segment_index, 0)
+        self.assertEqual(matched[0].axis_min, 0.8)
+        self.assertEqual(matched[0].axis_max, 1.6)
+
+    def test_rejects_opening_far_from_wall_segment(self):
+        from core.wall_openings import WallOpening
+        from core.wall_model import match_wall_openings_to_segments
+
+        wall = WallSegment("horizontal", 0.0, 0.0, 3.0, 0.0, 0.0, 2.6, 3.0, 100, 2.6)
+        opening = WallOpening(
+            id="door-0001",
+            label="door",
+            source_image="608.jpg",
+            seed_index=1,
+            point_count=20,
+            confidence="high",
+            reason="accepted_vertical_planar_region",
+            center=(1.0, 2.0, 1.0),
+            normal=(0.0, 1.0, 0.0),
+            bbox_min=(0.6, 1.9, 0.0),
+            bbox_max=(1.4, 2.1, 2.0),
+            width_m=0.8,
+            height_m=2.0,
+            z_min=0.0,
+            z_max=2.0,
+            detection_index=-1,
+            score=None,
+        )
+
+        matched, unmatched = match_wall_openings_to_segments(
+            [opening],
+            [wall],
+            max_plane_distance_m=0.25,
+        )
+
+        self.assertEqual(matched, [])
+        self.assertEqual(unmatched[0]["id"], "door-0001")
+        self.assertEqual(unmatched[0]["reason"], "no_matching_wall_segment")
+
     def test_generates_wall_model_artifacts_for_synthetic_room(self):
         xs = np.linspace(0.0, 4.0, 45)
         ys = np.linspace(0.0, 3.0, 35)

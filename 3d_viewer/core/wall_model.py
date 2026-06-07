@@ -18,6 +18,7 @@ from core.wall_image import (
     preserve_wall_density_grid,
     wall_image_output_dir,
 )
+from core.wall_openings import WallOpening
 
 
 DEFAULT_WALL_THICKNESS_M = 0.14
@@ -62,6 +63,20 @@ class WallModelResult:
     segment_count: int
     vertex_count: int
     face_count: int
+
+
+@dataclass(frozen=True)
+class WallOpeningMarker:
+    opening_id: str
+    label: str
+    segment_index: int
+    orientation: str
+    wall_coord: float
+    axis_min: float
+    axis_max: float
+    z_min: float
+    z_max: float
+    side: float
 
 
 @dataclass(frozen=True)
@@ -756,6 +771,65 @@ def complete_boundary_corner_gaps(
     completed.extend(verified)
     completed.sort(key=lambda item: item.length_m, reverse=True)
     return completed
+
+
+def match_wall_openings_to_segments(
+    openings: Iterable[WallOpening],
+    segments: list[WallSegment],
+    *,
+    max_plane_distance_m: float = 0.35,
+    span_tolerance_m: float = 0.25,
+) -> tuple[list[WallOpeningMarker], list[dict]]:
+    matched: list[WallOpeningMarker] = []
+    unmatched: list[dict] = []
+    for opening in openings:
+        best = None
+        best_distance = float("inf")
+        center = np.asarray(opening.center, dtype=np.float64)
+        bbox_min = np.asarray(opening.bbox_min, dtype=np.float64)
+        bbox_max = np.asarray(opening.bbox_max, dtype=np.float64)
+        for index, seg in enumerate(segments):
+            if seg.orientation == "vertical":
+                axis_min, axis_max = sorted((float(bbox_min[1]), float(bbox_max[1])))
+                seg_min, seg_max = sorted((seg.y1, seg.y2))
+                distance = abs(float(center[0]) - seg.x1)
+                side = 1.0 if float(center[0]) >= seg.x1 else -1.0
+                wall_coord = seg.x1
+            else:
+                axis_min, axis_max = sorted((float(bbox_min[0]), float(bbox_max[0])))
+                seg_min, seg_max = sorted((seg.x1, seg.x2))
+                distance = abs(float(center[1]) - seg.y1)
+                side = 1.0 if float(center[1]) >= seg.y1 else -1.0
+                wall_coord = seg.y1
+            if distance > max_plane_distance_m:
+                continue
+            if axis_max < seg_min - span_tolerance_m or axis_min > seg_max + span_tolerance_m:
+                continue
+            if distance < best_distance:
+                best_distance = distance
+                best = (index, seg, wall_coord, max(seg_min, axis_min), min(seg_max, axis_max), side)
+        if best is None:
+            unmatched.append({"id": opening.id, "label": opening.label, "reason": "no_matching_wall_segment"})
+            continue
+        index, seg, wall_coord, axis_min, axis_max, side = best
+        if axis_max <= axis_min:
+            unmatched.append({"id": opening.id, "label": opening.label, "reason": "empty_projected_opening_span"})
+            continue
+        matched.append(
+            WallOpeningMarker(
+                opening_id=opening.id,
+                label=opening.label,
+                segment_index=index,
+                orientation=seg.orientation,
+                wall_coord=float(wall_coord),
+                axis_min=round(float(axis_min), 5),
+                axis_max=round(float(axis_max), 5),
+                z_min=round(max(float(opening.z_min), float(seg.z_min)), 5),
+                z_max=round(min(float(opening.z_max), float(seg.z_max)), 5),
+                side=float(side),
+            )
+        )
+    return matched, unmatched
 
 
 def wall_segments_to_mesh(
