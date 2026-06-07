@@ -624,7 +624,74 @@ class WallModelTest(unittest.TestCase):
             self.assertEqual(result.projected_opening_count, 0)
             self.assertEqual(payload["opening_markers"][0]["opening_id"], "window-0001")
 
-    def test_generate_wall_model_projects_unmatched_opening_metadata(self):
+    def test_generate_wall_model_projects_reliable_unmatched_opening_metadata(self):
+        from core.wall_openings import WallOpening
+
+        xs = np.linspace(0.0, 4.0, 45)
+        ys = np.linspace(0.0, 3.0, 35)
+        zs = np.linspace(0.0, 2.4, 12)
+        points = []
+        for z in zs:
+            for x in xs:
+                points.append([x, 0.0, z])
+                points.append([x, 3.0, z])
+            for y in ys:
+                points.append([0.0, y, z])
+                points.append([4.0, y, z])
+        points = np.asarray(points, dtype=np.float64)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            data_root = workspace / "scan"
+            data_root.mkdir()
+            opening = WallOpening(
+                id="window-0001",
+                label="window",
+                source_image="608.jpg",
+                seed_index=1,
+                point_count=20,
+                confidence="high",
+                reason="fused_frustum_and_planar_geometry",
+                center=(2.0, 1.5, 0.5),
+                normal=(1.0, 0.0, 0.0),
+                bbox_min=(1.8, 1.3, 0.2),
+                bbox_max=(2.2, 1.7, 0.8),
+                width_m=0.4,
+                height_m=0.6,
+                z_min=0.2,
+                z_max=0.8,
+                detection_index=-1,
+                score=None,
+            )
+
+            result = generate_wall_model(
+                workspace,
+                data_root,
+                points,
+                openings=[opening],
+                resolution_m=0.1,
+            )
+
+            payload = json.loads(result.metadata_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["matched_opening_count"], 0)
+            self.assertEqual(payload["unmatched_opening_count"], 1)
+            self.assertEqual(payload["projected_opening_count"], 1)
+            self.assertEqual(result.projected_opening_count, 1)
+            self.assertEqual(payload["projected_openings"][0]["id"], "window-0001")
+            self.assertEqual(payload["opening_markers"], [])
+
+            events = [
+                json.loads(line)
+                for line in wall_opening_events_path(workspace, data_root).read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(events[-1]["event"], "generate_wall_model_opening_match")
+            self.assertEqual(events[-1]["matched_opening_count"], 0)
+            self.assertEqual(events[-1]["projected_opening_count"], 1)
+            self.assertEqual(events[-1]["unmatched_opening_count"], 1)
+            self.assertEqual(events[-1]["unmatched_openings"][0]["id"], "window-0001")
+
+    def test_generate_wall_model_does_not_project_rejected_unmatched_opening(self):
         from core.wall_openings import WallOpening
 
         xs = np.linspace(0.0, 4.0, 45)
@@ -675,21 +742,9 @@ class WallModelTest(unittest.TestCase):
             payload = json.loads(result.metadata_path.read_text(encoding="utf-8"))
             self.assertEqual(payload["matched_opening_count"], 0)
             self.assertEqual(payload["unmatched_opening_count"], 1)
-            self.assertEqual(payload["projected_opening_count"], 1)
-            self.assertEqual(result.projected_opening_count, 1)
-            self.assertEqual(payload["projected_openings"][0]["id"], "window-0001")
-            self.assertEqual(payload["opening_markers"], [])
-
-            events = [
-                json.loads(line)
-                for line in wall_opening_events_path(workspace, data_root).read_text(encoding="utf-8").splitlines()
-                if line.strip()
-            ]
-            self.assertEqual(events[-1]["event"], "generate_wall_model_opening_match")
-            self.assertEqual(events[-1]["matched_opening_count"], 0)
-            self.assertEqual(events[-1]["projected_opening_count"], 1)
-            self.assertEqual(events[-1]["unmatched_opening_count"], 1)
-            self.assertEqual(events[-1]["unmatched_openings"][0]["id"], "window-0001")
+            self.assertEqual(payload["projected_opening_count"], 0)
+            self.assertEqual(result.projected_opening_count, 0)
+            self.assertEqual(payload["projected_openings"], [])
 
 
 if __name__ == "__main__":

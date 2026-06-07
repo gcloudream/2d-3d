@@ -932,8 +932,21 @@ def _projected_openings_from_unmatched(
         if not isinstance(opening_index, int):
             continue
         if 0 <= opening_index < len(openings):
-            projected.append(openings[opening_index])
+            opening = openings[opening_index]
+            if _is_projectable_unmatched_opening(opening):
+                projected.append(opening)
     return projected
+
+
+def _is_projectable_unmatched_opening(opening: WallOpening) -> bool:
+    label = (opening.label or "").lower()
+    if label not in {"door", "window"}:
+        return False
+    reason = (opening.reason or "").lower()
+    if "too_few" in reason or "rejected_" in reason:
+        return False
+    confidence = (opening.confidence or "").lower()
+    return confidence == "high" or reason.startswith(("accepted_", "fused_"))
 
 
 def _append_marker_strip_box(

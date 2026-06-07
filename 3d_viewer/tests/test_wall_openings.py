@@ -82,6 +82,39 @@ class WallOpeningsTest(unittest.TestCase):
         self.assertEqual(saved.id, "door-0001")
         self.assertEqual(loaded[0].id, "door-0001")
 
+    def test_append_reuses_existing_duplicate_opening(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            data_root = workspace / "scan"
+            data_root.mkdir()
+            opening = WallOpening(
+                id="",
+                label="window",
+                source_image="608.jpg",
+                seed_index=2,
+                point_count=100,
+                confidence="high",
+                reason="fused_frustum_and_planar_geometry",
+                center=(1.0, 2.0, 1.0),
+                normal=(1.0, 0.0, 0.0),
+                bbox_min=(0.9, 1.5, 0.2),
+                bbox_max=(1.1, 2.5, 1.8),
+                width_m=1.0,
+                height_m=1.6,
+                z_min=0.2,
+                z_max=1.8,
+                detection_index=4,
+                score=1.0,
+            )
+
+            first = append_wall_opening(workspace, data_root, opening)
+            second = append_wall_opening(workspace, data_root, opening)
+            loaded = load_wall_openings(workspace, data_root)
+
+        self.assertEqual(first.id, "window-0001")
+        self.assertEqual(second.id, "window-0001")
+        self.assertEqual(len(loaded), 1)
+
     def test_builds_opening_from_selection_mask(self):
         points = np.asarray([
             [1.0, 0.0, 0.8],

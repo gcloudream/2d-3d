@@ -70,6 +70,9 @@ def save_wall_openings(workspace: Path, data_root: Path, openings: list[WallOpen
 
 def append_wall_opening(workspace: Path, data_root: Path, opening: WallOpening) -> WallOpening:
     existing = load_wall_openings(workspace, data_root)
+    for item in existing:
+        if _is_duplicate_opening(item, opening):
+            return item
     label = opening.label or "opening"
     saved = WallOpening(
         id=opening.id or f"{label}-{len(existing) + 1:04d}",
@@ -92,6 +95,24 @@ def append_wall_opening(workspace: Path, data_root: Path, opening: WallOpening) 
     )
     save_wall_openings(workspace, data_root, [*existing, saved])
     return saved
+
+
+def _is_duplicate_opening(existing: WallOpening, opening: WallOpening) -> bool:
+    if existing.label != opening.label:
+        return False
+    if existing.source_image != opening.source_image:
+        return False
+    if existing.detection_index != opening.detection_index:
+        return False
+    return (
+        _xyz_close(existing.center, opening.center)
+        and _xyz_close(existing.bbox_min, opening.bbox_min)
+        and _xyz_close(existing.bbox_max, opening.bbox_max)
+    )
+
+
+def _xyz_close(a: tuple[float, float, float], b: tuple[float, float, float], tolerance: float = 0.02) -> bool:
+    return all(abs(float(x) - float(y)) <= tolerance for x, y in zip(a, b))
 
 
 def opening_from_selection(
