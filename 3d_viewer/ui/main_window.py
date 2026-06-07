@@ -335,12 +335,14 @@ class MainWindow(QMainWindow):
         if new_mask is None:
             if not self.cb_supplement.isChecked():
                 self._set_highlight_mask(None)
-            return
+                return None
+            return self._highlight_mask
         new_mask = np.asarray(new_mask, dtype=bool)
         if self.cb_supplement.isChecked() and self._highlight_mask is not None:
             if len(self._highlight_mask) == len(new_mask):
                 new_mask = self._highlight_mask | new_mask
         self._set_highlight_mask(new_mask)
+        return self._highlight_mask
 
     def _clear_highlight(self):
         self._set_highlight_mask(None)
@@ -398,9 +400,8 @@ class MainWindow(QMainWindow):
         fused = self._try_fused_extraction(idx)
         if fused is not None and fused.source == "fused":
             highlight = fused.mask if should_highlight_fused(fused) else None
-            self._apply_extraction_highlight(highlight)
-            self._last_opening_candidate = self._opening_candidate_from_selection(idx, fused, highlight)
-            self._log_opening_selection_event("extract_opening_candidate", idx, fused, highlight)
+            effective_highlight = self._set_opening_candidate_from_extraction(idx, fused, highlight)
+            self._log_opening_selection_event("extract_opening_candidate", idx, fused, effective_highlight)
             self.scene.set_selected_detection(fused.detection_index)
             width = f"{fused.width_m:.2f}" if fused.width_m is not None else "—"
             height = f"{fused.height_m:.2f}" if fused.height_m is not None else "—"
@@ -417,9 +418,8 @@ class MainWindow(QMainWindow):
 
         selection = extract_planar_region_from_seed(self.dataset.points, idx)
         highlight = selection.mask if should_highlight_planar_region(selection) else None
-        self._apply_extraction_highlight(highlight)
-        self._last_opening_candidate = self._opening_candidate_from_selection(idx, selection, highlight)
-        self._log_opening_selection_event("extract_opening_candidate", idx, selection, highlight)
+        effective_highlight = self._set_opening_candidate_from_extraction(idx, selection, highlight)
+        self._log_opening_selection_event("extract_opening_candidate", idx, selection, effective_highlight)
         if not supplement:
             self.scene.set_selected_detection(-1)
         width = f"{selection.width_m:.2f}" if selection.width_m is not None else "—"
@@ -451,6 +451,17 @@ class MainWindow(QMainWindow):
             "score": getattr(selection, "score", None),
         }
 
+    def _set_opening_candidate_from_extraction(self, seed_idx: int, selection, latest_highlight):
+        effective_highlight = self._apply_extraction_highlight(latest_highlight)
+        if latest_highlight is None and self.cb_supplement.isChecked():
+            return effective_highlight
+        self._last_opening_candidate = self._opening_candidate_from_selection(
+            seed_idx,
+            selection,
+            effective_highlight,
+        )
+        return effective_highlight
+
     def _log_opening_selection_event(self, event: str, seed_idx: int, selection, highlight):
         if self.dataset is None:
             return
@@ -475,6 +486,7 @@ class MainWindow(QMainWindow):
             "candidate_point_count": int(getattr(selection, "point_count", 0)),
             "highlight_point_count": self._mask_count(self._highlight_mask),
             "supplement_mode": bool(self.cb_supplement.isChecked()),
+            "event_mask_source": "effective_highlight" if self.cb_supplement.isChecked() else "latest_highlight",
             "yaw_offset_deg": self._json_float_or_none(self.yaw_offset.currentData()),
         }
         if self.dataset is not None and highlight_mask is not None and len(highlight_mask) == len(self.dataset.points):
@@ -537,6 +549,7 @@ class MainWindow(QMainWindow):
                 "candidate_point_count": self._mask_count(candidate_mask),
                 "highlight_point_count": self._mask_count(self._highlight_mask),
                 "supplement_mode": bool(self.cb_supplement.isChecked()),
+                "record_mask_source": "accumulated_highlight" if self.cb_supplement.isChecked() else "latest_highlight",
                 "yaw_offset_deg": self._json_float_or_none(self.yaw_offset.currentData()),
                 "center": list(opening.center),
                 "normal": list(opening.normal),
