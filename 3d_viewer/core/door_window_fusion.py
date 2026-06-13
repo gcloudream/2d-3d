@@ -20,7 +20,10 @@ This module orchestrates that fusion; it owns no new geometry maths and reuses
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+import logging
+from dataclasses import dataclass, replace
+from time import perf_counter
 from typing import Sequence
 
 import numpy as np
@@ -38,6 +41,119 @@ from core.projection import project_points_to_panorama
 # share the same bbox cone before geometry growth runs).
 DEFAULT_FRUSTUM_DEPTH_WINDOW = 0.6
 DEFAULT_AUTO_SEED_COUNT = 24
+LOGGER = logging.getLogger("3d_viewer.core.door_window_fusion")
+
+
+def _array_cache_key(values: np.ndarray | Sequence[float]) -> tuple[tuple[int, ...], bytes]:
+    arr = np.ascontiguousarray(np.asarray(values, dtype=np.float64))
+    return arr.shape, arr.tobytes()
+
+
+def _points_cache_key(points: np.ndarray) -> tuple[int, tuple[int, ...], str, tuple[int, ...]]:
+    arr = np.asarray(points)
+    data_ptr = int(arr.__array_interface__["data"][0]) if arr.size else 0
+    return data_ptr, tuple(arr.shape), str(arr.dtype), tuple(arr.strides)
+
+
+def _bbox_cache_key(detection: dict) -> tuple[float, ...]:
+    return tuple(float(v) for v in detection.get("bbox", ()))
+
+
+def _elapsed_ms(start: float) -> float:
+    return round((perf_counter() - start) * 1000.0, 3)
+
+
+def _finish_diagnostics(diagnostics: dict[str, object], start: float) -> dict[str, object]:
+    diagnostics["total_ms"] = _elapsed_ms(start)
+    return diagnostics
+
+
+def _log_fusion_result(event: str, selection: "FusedSelection"):
+    diagnostics = selection.diagnostics or {}
+    LOGGER.info(
+        "%s reason=%s confidence=%s label=%s points=%s detection=%s diagnostics=%s",
+        event,
+        selection.reason,
+        selection.confidence,
+        selection.label,
+        selection.point_count,
+        selection.detection_index,
+        json.dumps(diagnostics, ensure_ascii=False, sort_keys=True),
+    )
+
+
+class FrustumProjectionCache:
+    """Cache projected panorama coordinates and bbox masks for one point cloud.
+
+    The point cloud is treated as immutable while the cache is in use. MainWindow
+    clears this cache when the keyframe, detections, or yaw calibration changes.
+    """
+
+    def __init__(self):
+        self._projection_key: tuple[object, ...] | None = None
+        self._projection_uv: np.ndarray | None = None
+        self._candidate_masks: dict[tuple[object, ...], np.ndarray] = {}
+        self._distance_key: tuple[object, ...] | None = None
+        self._distances: np.ndarray | None = None
+
+    def clear(self):
+        self._projection_key = None
+        self._projection_uv = None
+        self._candidate_masks.clear()
+        self._distance_key = None
+        self._distances = None
+
+    def project(
+        self,
+        points: np.ndarray,
+        cam_pos: np.ndarray,
+        R_pano: np.ndarray,
+        img_w: int,
+        img_h: int,
+        yaw_offset_deg: float,
+    ) -> tuple[np.ndarray, bool]:
+        key = (
+            _points_cache_key(points),
+            _array_cache_key(cam_pos),
+            _array_cache_key(R_pano),
+            int(img_w),
+            int(img_h),
+            float(yaw_offset_deg),
+        )
+        if self._projection_key == key and self._projection_uv is not None:
+            return self._projection_uv, True
+        uv = project_points_to_panorama(
+            points, cam_pos, R_pano, img_w, img_h, yaw_offset_deg=yaw_offset_deg
+        )
+        self._projection_key = key
+        self._projection_uv = uv
+        self._candidate_masks.clear()
+        return uv, False
+
+    def distances(self, points: np.ndarray, cam_pos: np.ndarray) -> tuple[np.ndarray, bool]:
+        key = (_points_cache_key(points), _array_cache_key(cam_pos))
+        if self._distance_key == key and self._distances is not None:
+            return self._distances, True
+        cam = np.asarray(cam_pos, dtype=np.float64).reshape(3)
+        pts64 = np.asarray(points, dtype=np.float64)
+        distances = np.linalg.norm(pts64 - cam.reshape(1, 3), axis=1)
+        self._distance_key = key
+        self._distances = distances
+        return distances, False
+
+    def candidate_mask(
+        self,
+        uv: np.ndarray,
+        detection: dict,
+        pano_w: float,
+    ) -> tuple[np.ndarray, bool]:
+        key = (self._projection_key, _points_cache_key(uv), _bbox_cache_key(detection), float(pano_w))
+        cached = self._candidate_masks.get(key)
+        if cached is not None:
+            return cached, True
+        mask = _frustum_candidate_mask_from_uv(uv, detection, float(pano_w))
+        self._candidate_masks[key] = mask
+        return mask, False
 
 
 @dataclass(frozen=True)
@@ -54,9 +170,16 @@ class FusedSelection:
     plane_normal: np.ndarray | None
     width_m: float | None
     height_m: float | None
+    diagnostics: dict[str, object] | None = None
+    debug_masks: dict[str, np.ndarray] | None = None
 
 
-def _empty(n: int, reason: str) -> FusedSelection:
+def _empty(
+    n: int,
+    reason: str,
+    diagnostics: dict[str, object] | None = None,
+    debug_masks: dict[str, np.ndarray] | None = None,
+) -> FusedSelection:
     return FusedSelection(
         mask=np.zeros(n, dtype=bool),
         point_count=0,
@@ -70,7 +193,25 @@ def _empty(n: int, reason: str) -> FusedSelection:
         plane_normal=None,
         width_m=None,
         height_m=None,
+        diagnostics=diagnostics,
+        debug_masks=debug_masks,
     )
+
+
+def _debug_masks(
+    *,
+    bbox: np.ndarray | None = None,
+    depth: np.ndarray | None = None,
+    final: np.ndarray | None = None,
+) -> dict[str, np.ndarray]:
+    masks: dict[str, np.ndarray] = {}
+    if bbox is not None:
+        masks["bbox"] = np.asarray(bbox, dtype=bool).copy()
+    if depth is not None:
+        masks["depth"] = np.asarray(depth, dtype=bool).copy()
+    if final is not None:
+        masks["final"] = np.asarray(final, dtype=bool).copy()
+    return masks
 
 
 def _selection_from_region(
@@ -139,6 +280,7 @@ def frustum_candidate_mask(
     yaw_offset_deg: float = 0.0,
     seed_idx: int | None = None,
     depth_window: float | None = DEFAULT_FRUSTUM_DEPTH_WINDOW,
+    cache: FrustumProjectionCache | None = None,
 ) -> np.ndarray:
     """Points whose projection lands inside ``detection``'s bbox (its frustum).
 
@@ -146,13 +288,13 @@ def frustum_candidate_mask(
     clipped to a depth shell around the seed so the far wall stacked behind the
     door in the same bbox is removed before growing.
     """
-    uv = project_points_to_panorama(
-        points, cam_pos, R_pano, img_w, img_h, yaw_offset_deg=yaw_offset_deg
+    cache_obj = cache if cache is not None else FrustumProjectionCache()
+    uv, _ = cache_obj.project(
+        np.asarray(points), cam_pos, R_pano, img_w, img_h, yaw_offset_deg
     )
-    inside = _frustum_candidate_mask_from_uv(uv, detection, float(img_w))
+    inside, _ = cache_obj.candidate_mask(uv, detection, float(img_w))
     if seed_idx is not None and depth_window is not None:
-        cam = np.asarray(cam_pos, dtype=np.float64).reshape(3)
-        dist = np.linalg.norm(np.asarray(points, dtype=np.float64) - cam.reshape(1, 3), axis=1)
+        dist, _ = cache_obj.distances(np.asarray(points), cam_pos)
         inside = _depth_clipped_candidate_mask(inside, dist, seed_idx, depth_window)
     return inside
 
@@ -167,6 +309,7 @@ def fuse_detection_and_pointcloud(
     img_h: int,
     yaw_offset_deg: float = 0.0,
     frustum_depth_window: float = DEFAULT_FRUSTUM_DEPTH_WINDOW,
+    cache: FrustumProjectionCache | None = None,
 ) -> FusedSelection:
     """Extract a door/window region by fusing the clicked seed's frustum + geometry.
 
@@ -175,53 +318,101 @@ def fuse_detection_and_pointcloud(
     runs inside that frustum and inherits the detection label; otherwise the
     caller should fall back to the unconstrained pure-point-cloud path.
     """
+    started = perf_counter()
     pts = np.asarray(points)
     n = len(pts)
+    diagnostics: dict[str, object] = {
+        "path": "seed",
+        "point_count": int(n),
+        "seed_index": int(seed_idx),
+        "detection_count": int(len(detections)),
+    }
     if seed_idx < 0 or seed_idx >= n:
-        return _empty(n, "seed_out_of_range")
+        result = _empty(n, "seed_out_of_range", _finish_diagnostics(diagnostics, started))
+        _log_fusion_result("fuse_detection_and_pointcloud", result)
+        return result
     if not detections or img_w <= 0 or img_h <= 0:
-        return _empty(n, "no_detections")
+        reason = "no_detections" if not detections else "invalid_image_size"
+        result = _empty(n, reason, _finish_diagnostics(diagnostics, started))
+        _log_fusion_result("fuse_detection_and_pointcloud", result)
+        return result
 
     # 1. Which detection frustum contains the clicked seed? (smallest bbox wins,
     #    matching the 2D-guided path's nested-box preference).
-    uv = project_points_to_panorama(
-        pts, cam_pos, R_pano, img_w, img_h, yaw_offset_deg=yaw_offset_deg
+    cache_obj = cache if cache is not None else FrustumProjectionCache()
+    phase = perf_counter()
+    uv, projection_cache_hit = cache_obj.project(
+        pts, cam_pos, R_pano, img_w, img_h, yaw_offset_deg
     )
+    diagnostics["projection_ms"] = _elapsed_ms(phase)
+    diagnostics["projection_cache_hit"] = bool(projection_cache_hit)
+
     matches = match_points_to_detections(uv, detections, float(img_w))
     det_idx = int(matches.match_indices[seed_idx])
     if det_idx < 0:
-        return _empty(n, "seed_not_in_any_frustum")
+        result = _empty(n, "seed_not_in_any_frustum", _finish_diagnostics(diagnostics, started))
+        _log_fusion_result("fuse_detection_and_pointcloud", result)
+        return result
 
     detection = detections[det_idx]
     label = str(detection.get("label", "")).lower() or None
     detection_score = float(detection["score"]) if "score" in detection else None
 
     # 2. Frustum candidate set for that detection, depth-clipped around the seed.
-    candidate = frustum_candidate_mask(
-        pts, cam_pos, R_pano, img_w, img_h, detection,
-        yaw_offset_deg=yaw_offset_deg,
-        seed_idx=seed_idx,
-        depth_window=frustum_depth_window,
+    phase = perf_counter()
+    candidate, candidate_cache_hit = cache_obj.candidate_mask(uv, detection, float(img_w))
+    distances, distance_cache_hit = cache_obj.distances(pts, cam_pos)
+    clipped_candidate = _depth_clipped_candidate_mask(
+        candidate,
+        distances,
+        seed_idx,
+        frustum_depth_window,
     )
+    diagnostics.update({
+        "detection_index": int(det_idx),
+        "candidate_ms": _elapsed_ms(phase),
+        "candidate_cache_hit": bool(candidate_cache_hit),
+        "distance_cache_hit": bool(distance_cache_hit),
+        "bbox_candidate_count": int(candidate.sum()),
+        "selected_depth_candidate_count": int(clipped_candidate.sum()),
+        "seed_attempt_count": 1,
+    })
 
     # 3 + 4. Constrained planar growth + geometry scoring, with the 2D label as
     #        the size-check hint. Growth is bounded by the frustum candidate set,
     #        so a wall-flush door no longer spreads across the whole wall.
+    phase = perf_counter()
     region: PlanarRegionSelection = extract_planar_region_from_seed(
         pts,
         seed_idx,
-        candidate_mask=candidate,
+        candidate_mask=clipped_candidate,
         label_hint=label,
     )
+    diagnostics["extract_ms"] = _elapsed_ms(phase)
 
     # 5. Fuse the confidences. The frustum already agreed (seed is inside it), so
     #    a high-confidence geometry means both judges concur.
-    return _selection_from_region(
+    selection = _selection_from_region(
         region,
         detection_index=det_idx,
         label_hint=label,
         score=detection_score,
     )
+    selection = _clip_selection_to_detection_bbox(
+        selection,
+        uv=uv,
+        detection=detection,
+        pano_w=float(img_w),
+        inside_mask=candidate,
+    )
+    diagnostics["final_point_count"] = int(selection.point_count)
+    result = replace(
+        selection,
+        diagnostics=_finish_diagnostics(diagnostics, started),
+        debug_masks=_debug_masks(bbox=candidate, depth=clipped_candidate, final=selection.mask),
+    )
+    _log_fusion_result("fuse_detection_and_pointcloud", result)
+    return result
 
 
 def extract_detection_region_from_bbox(
@@ -236,32 +427,63 @@ def extract_detection_region_from_bbox(
     *,
     click_uv: tuple[float, float] | None = None,
     max_seed_count: int = DEFAULT_AUTO_SEED_COUNT,
+    cache: FrustumProjectionCache | None = None,
 ) -> FusedSelection:
     """Extract a detection's best door/window region without a manually clicked seed."""
+    started = perf_counter()
     pts = np.asarray(points)
     n = len(pts)
+    diagnostics: dict[str, object] = {
+        "path": "bbox",
+        "point_count": int(n),
+        "detection_index": int(detection_index),
+        "detection_count": int(len(detections)),
+    }
     if detection_index < 0 or detection_index >= len(detections):
-        return _empty(n, "detection_index_out_of_range")
+        result = _empty(n, "detection_index_out_of_range", _finish_diagnostics(diagnostics, started))
+        _log_fusion_result("extract_detection_region_from_bbox", result)
+        return result
     if img_w <= 0 or img_h <= 0:
-        return _empty(n, "invalid_image_size")
+        result = _empty(n, "invalid_image_size", _finish_diagnostics(diagnostics, started))
+        _log_fusion_result("extract_detection_region_from_bbox", result)
+        return result
 
     detection = detections[detection_index]
     label = str(detection.get("label", "")).lower() or None
     detection_score = float(detection["score"]) if "score" in detection else None
-    cam = np.asarray(cam_pos, dtype=np.float64).reshape(3)
-    pts64 = np.asarray(pts, dtype=np.float64)
-    distances = np.linalg.norm(pts64 - cam.reshape(1, 3), axis=1)
-    uv = project_points_to_panorama(
-        pts, cam_pos, R_pano, img_w, img_h, yaw_offset_deg=yaw_offset_deg
+    cache_obj = cache if cache is not None else FrustumProjectionCache()
+
+    phase = perf_counter()
+    uv, projection_cache_hit = cache_obj.project(
+        pts, cam_pos, R_pano, img_w, img_h, yaw_offset_deg
     )
+    diagnostics["projection_ms"] = _elapsed_ms(phase)
+    diagnostics["projection_cache_hit"] = bool(projection_cache_hit)
+
+    phase = perf_counter()
+    distances, distance_cache_hit = cache_obj.distances(pts, cam_pos)
+    diagnostics["distance_ms"] = _elapsed_ms(phase)
+    diagnostics["distance_cache_hit"] = bool(distance_cache_hit)
+
     target_uv = _valid_click_uv(click_uv, float(img_w))
-    candidate = _frustum_candidate_mask_from_uv(uv, detection, float(img_w))
+    phase = perf_counter()
+    candidate, candidate_cache_hit = cache_obj.candidate_mask(uv, detection, float(img_w))
+    diagnostics["candidate_ms"] = _elapsed_ms(phase)
+    diagnostics["candidate_cache_hit"] = bool(candidate_cache_hit)
+    diagnostics["bbox_candidate_count"] = int(candidate.sum())
     candidate_indices = np.flatnonzero(candidate)
     if len(candidate_indices) == 0:
-        return _empty(n, "bbox_no_points")
+        result = _empty(n, "bbox_no_points", _finish_diagnostics(diagnostics, started))
+        _log_fusion_result("extract_detection_region_from_bbox", result)
+        return result
 
     best: FusedSelection | None = None
-    for seed_idx in _auto_seed_indices(
+    selected_seed_idx: int | None = None
+    selected_depth_candidate_count = 0
+    selected_depth_candidate_mask: np.ndarray | None = None
+    depth_candidate_counts: list[int] = []
+    extract_ms = 0.0
+    seed_indices = _auto_seed_indices(
         pts,
         candidate_indices,
         cam_pos,
@@ -269,35 +491,89 @@ def extract_detection_region_from_bbox(
         uv=uv,
         click_uv=target_uv,
         pano_w=float(img_w),
-    ):
+    )
+    diagnostics["auto_seed_count"] = int(len(seed_indices))
+
+    for seed_idx in seed_indices:
         clipped_candidate = _depth_clipped_candidate_mask(
             candidate,
             distances,
             int(seed_idx),
             DEFAULT_FRUSTUM_DEPTH_WINDOW,
         )
+        depth_candidate_count = int(clipped_candidate.sum())
+        depth_candidate_counts.append(depth_candidate_count)
+        phase = perf_counter()
         region = extract_planar_region_from_seed(
             pts,
             int(seed_idx),
             candidate_mask=clipped_candidate,
             label_hint=label,
         )
+        extract_ms += _elapsed_ms(phase)
         selection = _selection_from_region(
             region,
             detection_index=int(detection_index),
             label_hint=label,
             score=detection_score,
         )
-        selection_score = _fused_selection_score(selection, uv=uv, click_uv=target_uv, pano_w=float(img_w))
+        selection = _clip_selection_to_detection_bbox(
+            selection,
+            uv=uv,
+            detection=detection,
+            pano_w=float(img_w),
+            inside_mask=candidate,
+        )
+        selection_score = _fused_selection_score(
+            selection,
+            uv=uv,
+            click_uv=target_uv,
+            pano_w=float(img_w),
+            detection=detection,
+            distances=distances,
+            bbox_inside_mask=candidate,
+        )
         best_score = None if best is None else _fused_selection_score(
-            best, uv=uv, click_uv=target_uv, pano_w=float(img_w)
+            best,
+            uv=uv,
+            click_uv=target_uv,
+            pano_w=float(img_w),
+            detection=detection,
+            distances=distances,
+            bbox_inside_mask=candidate,
         )
         if best_score is None or selection_score > best_score:
             best = selection
+            selected_seed_idx = int(seed_idx)
+            selected_depth_candidate_count = depth_candidate_count
+            selected_depth_candidate_mask = clipped_candidate
+
+    diagnostics["seed_attempt_count"] = int(len(depth_candidate_counts))
+    diagnostics["extract_ms"] = round(float(extract_ms), 3)
+    if depth_candidate_counts:
+        diagnostics["depth_candidate_min"] = int(min(depth_candidate_counts))
+        diagnostics["depth_candidate_max"] = int(max(depth_candidate_counts))
+        diagnostics["selected_depth_candidate_count"] = int(selected_depth_candidate_count)
+    if selected_seed_idx is not None:
+        diagnostics["selected_seed_index"] = int(selected_seed_idx)
 
     if best is None or best.point_count <= 0:
-        return _empty(n, "bbox_no_extractable_region")
-    return best
+        result = _empty(
+            n,
+            "bbox_no_extractable_region",
+            _finish_diagnostics(diagnostics, started),
+            debug_masks=_debug_masks(bbox=candidate, depth=selected_depth_candidate_mask),
+        )
+        _log_fusion_result("extract_detection_region_from_bbox", result)
+        return result
+    diagnostics["final_point_count"] = int(best.point_count)
+    result = replace(
+        best,
+        diagnostics=_finish_diagnostics(diagnostics, started),
+        debug_masks=_debug_masks(bbox=candidate, depth=selected_depth_candidate_mask, final=best.mask),
+    )
+    _log_fusion_result("extract_detection_region_from_bbox", result)
+    return result
 
 
 def _auto_seed_indices(
@@ -337,19 +613,30 @@ def _fused_selection_score(
     uv: np.ndarray | None = None,
     click_uv: tuple[float, float] | None = None,
     pano_w: float | None = None,
-) -> tuple[int, int, int, int, int, int]:
+    detection: dict | None = None,
+    distances: np.ndarray | None = None,
+    bbox_inside_mask: np.ndarray | None = None,
+) -> tuple[int, ...]:
     confidence_rank = {"none": 0, "low": 1, "medium": 2, "high": 3}.get(selection.confidence, 0)
     reason_rank = 1 if selection.reason == "fused_frustum_and_planar_geometry" else 0
     label_rank = 1 if selection.label in {"door", "window"} else 0
     click_center_rank, click_spread_rank = _selection_click_ranks(
         selection, uv=uv, click_uv=click_uv, pano_w=pano_w
     )
+    bbox_inside_rank, bbox_center_rank, bbox_spread_rank = _selection_bbox_ranks(
+        selection, uv=uv, detection=detection, pano_w=pano_w, inside_mask=bbox_inside_mask
+    )
+    depth_rank = _selection_depth_rank(selection, distances=distances)
     return (
         confidence_rank,
         reason_rank,
         label_rank,
         click_center_rank,
         click_spread_rank,
+        depth_rank,
+        bbox_inside_rank,
+        bbox_center_rank,
+        bbox_spread_rank,
         int(selection.point_count),
     )
 
@@ -398,6 +685,80 @@ def _selection_click_ranks(
     return -int(round(median_dist * 1000.0)), -int(round(spread_dist * 100.0))
 
 
+def _clip_selection_to_detection_bbox(
+    selection: FusedSelection,
+    *,
+    uv: np.ndarray,
+    detection: dict,
+    pano_w: float,
+    inside_mask: np.ndarray | None = None,
+) -> FusedSelection:
+    mask = np.asarray(selection.mask, dtype=bool)
+    if len(mask) != len(uv) or not mask.any():
+        return selection
+    if inside_mask is not None and len(inside_mask) == len(uv):
+        inside = np.asarray(inside_mask, dtype=bool)
+    else:
+        inside = _frustum_candidate_mask_from_uv(uv, detection, float(pano_w))
+    clipped = mask & inside
+    if np.array_equal(clipped, mask):
+        return selection
+    return replace(selection, mask=clipped, point_count=int(clipped.sum()))
+
+
+def _selection_bbox_ranks(
+    selection: FusedSelection,
+    *,
+    uv: np.ndarray | None,
+    detection: dict | None,
+    pano_w: float | None,
+    inside_mask: np.ndarray | None = None,
+) -> tuple[int, int, int]:
+    if uv is None or detection is None or pano_w is None:
+        return 0, 0, 0
+    mask = np.asarray(selection.mask, dtype=bool)
+    if len(mask) != len(uv) or not mask.any():
+        return 0, 0, 0
+    if inside_mask is not None and len(inside_mask) == len(uv):
+        inside = np.asarray(inside_mask, dtype=bool)
+    else:
+        inside = _frustum_candidate_mask_from_uv(uv, detection, float(pano_w))
+    inside_ratio = float((mask & inside).sum()) / float(mask.sum())
+    center_uv = _bbox_center_uv(detection["bbox"], float(pano_w))
+    distances = _panorama_pixel_distances(uv[mask], center_uv, float(pano_w))
+    median_dist = float(np.median(distances))
+    spread_dist = float(np.percentile(distances, 90))
+    return (
+        int(round(inside_ratio * 1000.0)),
+        -int(round(median_dist * 1000.0)),
+        -int(round(spread_dist * 100.0)),
+    )
+
+
+def _selection_depth_rank(
+    selection: FusedSelection,
+    *,
+    distances: np.ndarray | None,
+) -> int:
+    if distances is None:
+        return 0
+    mask = np.asarray(selection.mask, dtype=bool)
+    if len(mask) != len(distances) or not mask.any():
+        return 0
+    median_depth = float(np.median(np.asarray(distances, dtype=np.float64)[mask]))
+    return -int(round(median_depth * 1000.0))
+
+
+def _bbox_center_uv(bbox: Sequence[float], pano_w: float) -> tuple[float, float]:
+    x1, y1, x2, y2 = [float(v) for v in bbox]
+    if pano_w > 0 and x2 < x1:
+        width = (pano_w - x1) + x2
+        u = (x1 + width / 2.0) % pano_w
+    else:
+        u = (x1 + x2) / 2.0
+    return u, (y1 + y2) / 2.0
+
+
 def _unique_preserve_order(values: np.ndarray) -> np.ndarray:
     seen: set[int] = set()
     ordered: list[int] = []
@@ -411,6 +772,11 @@ def _unique_preserve_order(values: np.ndarray) -> np.ndarray:
 
 
 def should_highlight_fused(selection: FusedSelection) -> bool:
-    return selection.point_count > 0 and not (
-        selection.confidence == "low" and selection.reason.startswith("rejected_")
-    )
+    reason = str(selection.reason)
+    if selection.point_count <= 0:
+        return False
+    if str(selection.confidence) != "high":
+        return False
+    if reason.startswith("rejected_") or reason.startswith("frustum_only_") or "too_few" in reason:
+        return False
+    return True

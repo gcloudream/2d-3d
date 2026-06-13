@@ -106,6 +106,24 @@ def append_wall_opening(workspace: Path, data_root: Path, opening: WallOpening) 
     return saved
 
 
+def is_recordable_opening_metadata(label: str, reason: str, confidence: str | None = None) -> bool:
+    normalized_label = str(label or "").lower()
+    if normalized_label not in {"door", "window"}:
+        return False
+    normalized_reason = str(reason or "").lower()
+    if not normalized_reason:
+        return False
+    if (
+        normalized_reason.startswith("rejected_")
+        or normalized_reason.startswith("frustum_only_")
+        or "too_few" in normalized_reason
+    ):
+        return False
+    if confidence is not None and str(confidence or "").lower() == "none":
+        return False
+    return True
+
+
 def _is_duplicate_opening(existing: WallOpening, opening: WallOpening) -> bool:
     if existing.label != opening.label:
         return False
@@ -140,6 +158,8 @@ def opening_from_selection(
     detection_index: int = -1,
     score: float | None = None,
 ) -> WallOpening:
+    if not is_recordable_opening_metadata(label, reason, confidence):
+        raise ValueError(f"unrecordable opening candidate: {label or 'unknown'} / {reason or 'no_reason'}")
     selected = np.asarray(points, dtype=np.float64)[np.asarray(mask, dtype=bool)]
     if len(selected) == 0:
         raise ValueError("cannot record an opening without selected points")

@@ -19,6 +19,8 @@ sys.path.insert(0, str(ROOT))
 from PySide6.QtWidgets import QApplication
 
 from core.dataset import CameraPose, Dataset
+from core.app_logging import operation_events_path
+from core.detection_cache import annotation_output_path
 from core.wall_openings import (
     WallOpening,
     append_wall_opening_event,
@@ -101,6 +103,98 @@ class MainWindowWallOpeningsTest(unittest.TestCase):
             self.assertEqual(event["reason"], "accepted_vertical_planar_region")
             self.assertEqual(event["bbox_min"], [1.0, 0.0, 0.8])
 
+    def test_record_current_opening_rejects_failed_geometry_candidate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            data_root = workspace / "scan"
+            data_root.mkdir()
+            dataset = Dataset(
+                data_root=data_root,
+                camera_file=data_root / "camera_pos.cam",
+                image_dir=data_root,
+                pointcloud_file=data_root / "cloud.las",
+                poses=[],
+                points=np.asarray([
+                    [1.0, 0.0, 0.8],
+                    [1.0, 0.4, 1.0],
+                    [1.0, 0.8, 1.6],
+                ], dtype=np.float64),
+                colors=np.zeros((3, 3), dtype=np.uint8),
+                total_points=3,
+                sample_step=1,
+                pano_calibration=None,
+                pano_yaw_offset_deg=0.0,
+            )
+            with patch.object(MainWindow, "_load", lambda self: None):
+                win = MainWindow(workspace)
+            self.addCleanup(win.close)
+            win.dataset = dataset
+            win.current_idx = -1
+            win._last_opening_candidate = {
+                "mask": np.asarray([True, True, True]),
+                "label": "window",
+                "seed_index": 1,
+                "confidence": "medium",
+                "reason": "frustum_only_rejected_not_vertical_plane",
+                "plane_point": np.asarray([1.0, 0.4, 1.0]),
+                "plane_normal": np.asarray([0.0, 0.0, 1.0]),
+                "width_m": 0.8,
+                "height_m": 0.8,
+                "detection_index": 2,
+                "score": 0.8,
+            }
+
+            win._record_current_opening()
+
+            self.assertEqual(load_wall_openings(workspace, data_root), [])
+            self.assertFalse(wall_opening_events_path(workspace, data_root).exists())
+
+    def test_record_current_opening_rejects_incomplete_fused_candidate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            data_root = workspace / "scan"
+            data_root.mkdir()
+            dataset = Dataset(
+                data_root=data_root,
+                camera_file=data_root / "camera_pos.cam",
+                image_dir=data_root,
+                pointcloud_file=data_root / "cloud.las",
+                poses=[],
+                points=np.asarray([
+                    [1.0, 0.0, 0.8],
+                    [1.0, 0.4, 1.0],
+                    [1.0, 0.8, 1.6],
+                ], dtype=np.float64),
+                colors=np.zeros((3, 3), dtype=np.uint8),
+                total_points=3,
+                sample_step=1,
+                pano_calibration=None,
+                pano_yaw_offset_deg=0.0,
+            )
+            with patch.object(MainWindow, "_load", lambda self: None):
+                win = MainWindow(workspace)
+            self.addCleanup(win.close)
+            win.dataset = dataset
+            win.current_idx = -1
+            win._last_opening_candidate = {
+                "mask": np.asarray([True, True, True]),
+                "label": "window",
+                "seed_index": 1,
+                "confidence": "medium",
+                "reason": "frustum_only_too_few_region_points",
+                "plane_point": np.asarray([1.0, 0.4, 1.0]),
+                "plane_normal": np.asarray([1.0, 0.0, 0.0]),
+                "width_m": None,
+                "height_m": None,
+                "detection_index": 2,
+                "score": 0.8,
+            }
+
+            win._record_current_opening()
+
+            self.assertEqual(load_wall_openings(workspace, data_root), [])
+            self.assertFalse(wall_opening_events_path(workspace, data_root).exists())
+
     def test_load_clears_previous_wall_opening_session_files(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
@@ -181,6 +275,103 @@ class MainWindowWallOpeningsTest(unittest.TestCase):
 
             self.assertAlmostEqual(float(win.yaw_offset.currentData()), -90.0)
 
+    def test_load_enables_depth_test_for_primary_highlight(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            data_root = workspace / "scan"
+            data_root.mkdir()
+            dataset = Dataset(
+                data_root=data_root,
+                camera_file=data_root / "camera_pos.cam",
+                image_dir=data_root,
+                pointcloud_file=data_root / "cloud.las",
+                poses=[],
+                points=np.asarray([[1.0, 0.0, 0.8]], dtype=np.float64),
+                colors=np.zeros((1, 3), dtype=np.uint8),
+                total_points=1,
+                sample_step=1,
+                pano_calibration=None,
+                pano_yaw_offset_deg=-90.0,
+            )
+
+            with patch("ui.main_window.find_default_dataset", return_value=object()), \
+                patch("ui.main_window.load_dataset", return_value=dataset):
+                win = MainWindow(workspace)
+            self.addCleanup(win.close)
+
+            self.assertTrue(win.scene.gl_window._selected_depth_test)
+
+    def test_interaction_mode_configures_primary_and_global_views(self):
+        with patch.object(MainWindow, "_load", lambda self: None):
+            win = MainWindow(ROOT.parent)
+        self.addCleanup(win.close)
+
+        def choose(mode: str):
+            for i in range(win.interaction_mode.count()):
+                if win.interaction_mode.itemData(i) == mode:
+                    win.interaction_mode.setCurrentIndex(i)
+                    return
+            raise AssertionError(f"missing interaction mode {mode}")
+
+        choose("point")
+        self.assertEqual(win.scene.gl_window._interaction_mode, "point")
+        self.assertEqual(win.cloud_scene.gl_window._interaction_mode, "point")
+
+        choose("detection")
+        self.assertEqual(win.scene.gl_window._interaction_mode, "detection")
+        self.assertEqual(win.cloud_scene.gl_window._interaction_mode, "navigate")
+
+        choose("navigate")
+        self.assertEqual(win.scene.gl_window._interaction_mode, "navigate")
+        self.assertEqual(win.cloud_scene.gl_window._interaction_mode, "navigate")
+
+    def test_main_window_uses_manual_annotation_workflow_without_auto_detection_controls(self):
+        with patch.object(MainWindow, "_load", lambda self: None):
+            win = MainWindow(ROOT.parent)
+        self.addCleanup(win.close)
+
+        self.assertFalse(hasattr(win, "btn_detect_current"))
+        self.assertFalse(hasattr(win, "det_mode"))
+        self.assertTrue(hasattr(win, "btn_edit_current"))
+
+    def test_main_window_uses_single_panorama_visibility_checkbox(self):
+        with patch.object(MainWindow, "_load", lambda self: None):
+            win = MainWindow(ROOT.parent)
+        self.addCleanup(win.close)
+
+        calls: list[bool] = []
+        win.scene.set_show_pano = lambda on: calls.append(bool(on))
+
+        self.assertFalse(hasattr(win, "btn_toggle_pano"))
+        win.cb_pano.setChecked(False)
+        win.cb_pano.setChecked(True)
+
+        self.assertEqual(calls, [False, True])
+
+    def test_xray_highlight_toggle_updates_both_views_and_logs(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            with patch.object(MainWindow, "_load", lambda self: None):
+                win = MainWindow(workspace)
+            self.addCleanup(win.close)
+            win.current_idx = 3
+
+            win._set_highlight_xray(False)
+            self.assertTrue(win.scene.gl_window._selected_depth_test)
+            self.assertTrue(win.cloud_scene.gl_window._selected_depth_test)
+
+            win.cb_xray_highlight.setChecked(True)
+
+            self.assertFalse(win.scene.gl_window._selected_depth_test)
+            self.assertFalse(win.cloud_scene.gl_window._selected_depth_test)
+            events = [
+                json.loads(line)
+                for line in operation_events_path(workspace).read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(events[-1]["event"], "highlight_xray_changed")
+            self.assertTrue(events[-1]["xray_enabled"])
+
     def test_clear_highlight_clears_opening_candidate(self):
         with patch.object(MainWindow, "_load", lambda self: None):
             win = MainWindow(ROOT.parent)
@@ -226,6 +417,12 @@ class MainWindowWallOpeningsTest(unittest.TestCase):
                 plane_normal=np.asarray([1.0, 0.0, 0.0]),
                 width_m=0.8,
                 height_m=0.8,
+                diagnostics={
+                    "bbox_candidate_count": 120,
+                    "selected_depth_candidate_count": 64,
+                    "seed_attempt_count": 4,
+                    "total_ms": 12.345,
+                },
             )
 
             with patch.object(MainWindow, "_load", lambda self: None):
@@ -242,9 +439,263 @@ class MainWindowWallOpeningsTest(unittest.TestCase):
             extract.assert_called_once()
             self.assertEqual(extract.call_args.args[1], 0)
             self.assertEqual(extract.call_args.kwargs["click_uv"], (12.5, 18.5))
+            self.assertIs(extract.call_args.kwargs["cache"], win._fusion_cache)
             self.assertEqual(int(win._highlight_mask.sum()), 3)
             self.assertEqual(win._last_opening_candidate["label"], "window")
             self.assertEqual(win._last_opening_candidate["seed_index"], -1)
+            self.assertIn("diag: bbox=120", win.lbl_detection.text())
+            events = [
+                json.loads(line)
+                for line in operation_events_path(workspace).read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(events[-1]["event"], "detection_bbox_extract")
+            self.assertEqual(events[-1]["detection_index"], 0)
+            self.assertEqual(events[-1]["diagnostics"]["bbox_candidate_count"], 120)
+
+    def test_debug_layer_switch_displays_intermediate_mask_without_replacing_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            data_root = workspace / "scan"
+            data_root.mkdir()
+            final_mask = np.asarray([True, False, False, True])
+            bbox_mask = np.asarray([True, True, True, True])
+            depth_mask = np.asarray([True, True, False, True])
+            dataset = Dataset(
+                data_root=data_root,
+                camera_file=data_root / "camera_pos.cam",
+                image_dir=data_root,
+                pointcloud_file=data_root / "cloud.las",
+                poses=[CameraPose("608.jpg", 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)],
+                points=np.asarray([
+                    [1.0, 0.0, 0.8],
+                    [1.0, 0.4, 1.0],
+                    [1.0, 0.8, 1.6],
+                    [1.0, 1.2, 1.8],
+                ], dtype=np.float64),
+                colors=np.zeros((4, 3), dtype=np.uint8),
+                total_points=4,
+                sample_step=1,
+                pano_calibration=None,
+                pano_yaw_offset_deg=-90.0,
+            )
+            selection = SimpleNamespace(
+                mask=final_mask,
+                point_count=2,
+                confidence="high",
+                reason="fused_frustum_and_planar_geometry",
+                label="window",
+                source="fused",
+                detection_index=0,
+                score=0.9,
+                plane_point=np.asarray([1.0, 0.4, 1.0]),
+                plane_normal=np.asarray([1.0, 0.0, 0.0]),
+                width_m=0.8,
+                height_m=0.8,
+                diagnostics={
+                    "bbox_candidate_count": 4,
+                    "selected_depth_candidate_count": 3,
+                    "seed_attempt_count": 2,
+                    "total_ms": 5.0,
+                },
+                debug_masks={"bbox": bbox_mask, "depth": depth_mask, "final": final_mask},
+            )
+            displayed = []
+            styles = []
+
+            with patch.object(MainWindow, "_load", lambda self: None):
+                win = MainWindow(workspace)
+            self.addCleanup(win.close)
+            win.dataset = dataset
+            win.current_idx = 0
+            win.current_detections = [{"label": "window", "score": 0.9, "bbox": [10, 10, 20, 20]}]
+            win.current_image_size = (100, 50)
+
+            with patch("ui.main_window.extract_detection_region_from_bbox", return_value=selection), \
+                patch("ui.main_window.set_scene_pair_highlight_mask", side_effect=lambda _a, _b, mask: displayed.append(None if mask is None else np.asarray(mask, dtype=bool).copy())), \
+                patch("ui.main_window.set_scene_pair_highlight_style", side_effect=lambda _a, _b, ring, fill: styles.append((tuple(ring), tuple(fill)))):
+                win._on_detection_clicked(0, 12.5, 18.5)
+                self.assertTrue(np.array_equal(win._highlight_mask, final_mask))
+                self.assertTrue(np.array_equal(win._last_opening_candidate["mask"], final_mask))
+
+                win._set_debug_layer("bbox")
+                self.assertTrue(np.array_equal(displayed[-1], bbox_mask))
+                self.assertEqual(styles[-1], ((0.0, 0.85, 1.0), (0.0, 0.2, 1.0)))
+                self.assertTrue(np.array_equal(win._highlight_mask, final_mask))
+                self.assertTrue(np.array_equal(win._last_opening_candidate["mask"], final_mask))
+                self.assertIn("调试层: bbox", win.lbl_detection.text())
+
+                win._set_debug_layer("off")
+                self.assertTrue(np.array_equal(displayed[-1], final_mask))
+                self.assertEqual(styles[-1], ((1.0, 1.0, 0.0), (1.0, 0.0, 0.0)))
+            events = [
+                json.loads(line)
+                for line in operation_events_path(workspace).read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(events[-1]["event"], "debug_layer_changed")
+            self.assertEqual(events[-1]["debug_layer"], "off")
+
+    def test_top_point_click_uses_detection_fallback_when_seed_misses_frustum(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            data_root = workspace / "scan"
+            data_root.mkdir()
+            dataset = Dataset(
+                data_root=data_root,
+                camera_file=data_root / "camera_pos.cam",
+                image_dir=data_root,
+                pointcloud_file=data_root / "cloud.las",
+                poses=[CameraPose("608.jpg", 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)],
+                points=np.asarray([
+                    [1.0, 0.0, 0.8],
+                    [1.0, 0.4, 1.0],
+                    [1.0, 0.8, 1.6],
+                ], dtype=np.float64),
+                colors=np.zeros((3, 3), dtype=np.uint8),
+                total_points=3,
+                sample_step=1,
+                pano_calibration=None,
+                pano_yaw_offset_deg=-90.0,
+            )
+            bbox_selection = SimpleNamespace(
+                mask=np.asarray([True, True, False]),
+                point_count=2,
+                confidence="high",
+                reason="fused_frustum_and_planar_geometry",
+                label="window",
+                source="fused",
+                detection_index=0,
+                score=0.9,
+                plane_point=np.asarray([1.0, 0.2, 0.9]),
+                plane_normal=np.asarray([1.0, 0.0, 0.0]),
+                width_m=0.4,
+                height_m=0.8,
+                diagnostics={"bbox_candidate_count": 2, "seed_attempt_count": 2},
+            )
+            pure_selection = SimpleNamespace(
+                mask=np.asarray([True, True, True]),
+                point_count=3,
+                confidence="high",
+                reason="accepted_vertical_planar_region",
+                label="object",
+                source="",
+                detection_index=-1,
+                score=None,
+                plane_point=np.asarray([1.0, 0.4, 1.0]),
+                plane_normal=np.asarray([1.0, 0.0, 0.0]),
+                width_m=3.8,
+                height_m=3.0,
+                diagnostics={},
+            )
+            missed_fusion = SimpleNamespace(source="none", reason="seed_not_in_any_frustum")
+
+            with patch.object(MainWindow, "_load", lambda self: None):
+                win = MainWindow(workspace)
+            self.addCleanup(win.close)
+            win.dataset = dataset
+            win.current_idx = 0
+            win.current_detections = [{"label": "window", "score": 0.9, "bbox": [10, 10, 20, 20]}]
+            win.current_image_size = (100, 50)
+            win.scene.consume_point_detection_hit = lambda: (0, 12.5, 18.5)
+
+            with patch.object(win, "_try_fused_extraction", return_value=missed_fusion), \
+                patch("ui.main_window.extract_detection_region_from_bbox", return_value=bbox_selection) as extract, \
+                patch("ui.main_window.extract_planar_region_from_seed", return_value=pure_selection) as pure_extract:
+                win._on_point_clicked(43949)
+
+            pure_extract.assert_not_called()
+            extract.assert_called_once()
+            self.assertEqual(extract.call_args.args[1], 0)
+            self.assertEqual(extract.call_args.kwargs["click_uv"], (12.5, 18.5))
+            self.assertEqual(int(win._highlight_mask.sum()), 2)
+            self.assertEqual(win._last_opening_candidate["detection_index"], 0)
+            events = [
+                json.loads(line)
+                for line in operation_events_path(workspace).read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(events[-1]["event"], "pointcloud_detection_fallback_extract")
+            self.assertEqual(events[-1]["seed_index"], 43949)
+            self.assertEqual(events[-1]["fallback_detection_index"], 0)
+
+    def test_top_point_click_uses_detection_fallback_when_seed_fusion_is_rejected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            data_root = workspace / "scan"
+            data_root.mkdir()
+            dataset = Dataset(
+                data_root=data_root,
+                camera_file=data_root / "camera_pos.cam",
+                image_dir=data_root,
+                pointcloud_file=data_root / "cloud.las",
+                poses=[CameraPose("608.jpg", 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)],
+                points=np.asarray([
+                    [1.0, 0.0, 0.8],
+                    [1.0, 0.4, 1.0],
+                    [1.0, 0.8, 1.6],
+                ], dtype=np.float64),
+                colors=np.zeros((3, 3), dtype=np.uint8),
+                total_points=3,
+                sample_step=1,
+                pano_calibration=None,
+                pano_yaw_offset_deg=-90.0,
+            )
+            bbox_selection = SimpleNamespace(
+                mask=np.asarray([False, True, True]),
+                point_count=2,
+                confidence="high",
+                reason="fused_frustum_and_planar_geometry",
+                label="window",
+                source="fused",
+                detection_index=0,
+                score=0.9,
+                plane_point=np.asarray([1.0, 0.6, 1.3]),
+                plane_normal=np.asarray([1.0, 0.0, 0.0]),
+                width_m=0.4,
+                height_m=0.8,
+                diagnostics={"bbox_candidate_count": 2, "seed_attempt_count": 2},
+            )
+            rejected_fusion = SimpleNamespace(
+                mask=np.asarray([True, False, False]),
+                point_count=1,
+                confidence="medium",
+                reason="frustum_only_rejected_not_vertical_plane",
+                label="window",
+                source="fused",
+                detection_index=0,
+                score=0.9,
+                plane_point=np.asarray([1.0, 0.0, 0.8]),
+                plane_normal=np.asarray([0.0, 0.0, 1.0]),
+                width_m=0.2,
+                height_m=0.2,
+                diagnostics={},
+            )
+
+            with patch.object(MainWindow, "_load", lambda self: None):
+                win = MainWindow(workspace)
+            self.addCleanup(win.close)
+            win.dataset = dataset
+            win.current_idx = 0
+            win.current_detections = [{"label": "window", "score": 0.9, "bbox": [10, 10, 20, 20]}]
+            win.current_image_size = (100, 50)
+            win.scene.consume_point_detection_hit = lambda: (0, 12.5, 18.5)
+
+            with patch.object(win, "_try_fused_extraction", return_value=rejected_fusion), \
+                patch("ui.main_window.extract_detection_region_from_bbox", return_value=bbox_selection) as extract, \
+                patch("ui.main_window.extract_planar_region_from_seed") as pure_extract:
+                win._on_point_clicked(291867)
+
+            pure_extract.assert_not_called()
+            extract.assert_called_once()
+            self.assertEqual(int(win._highlight_mask.sum()), 2)
+            events = [
+                json.loads(line)
+                for line in operation_events_path(workspace).read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(events[-1]["event"], "pointcloud_detection_fallback_extract")
+            self.assertEqual(events[-1]["fallback_reason"], "frustum_only_rejected_not_vertical_plane")
 
     def test_record_current_opening_uses_accumulated_highlight_in_supplement_mode(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -360,6 +811,12 @@ class MainWindowWallOpeningsTest(unittest.TestCase):
                 width_m=0.4,
                 height_m=0.7,
                 source="fused",
+                diagnostics={
+                    "bbox_candidate_count": 10,
+                    "selected_depth_candidate_count": 6,
+                    "seed_attempt_count": 2,
+                    "total_ms": 3.21,
+                },
             )
 
             win._log_opening_selection_event(
@@ -383,8 +840,10 @@ class MainWindowWallOpeningsTest(unittest.TestCase):
             self.assertEqual(event["event_mask_source"], "latest_highlight")
             self.assertEqual(event["reason"], "frustum_only_rejected_not_vertical_plane")
             self.assertEqual(event["candidate_bbox_min"], [1.0, 0.0, 0.8])
+            self.assertEqual(event["extraction_diagnostics"]["bbox_candidate_count"], 10)
+            self.assertEqual(event["extraction_diagnostics"]["selected_depth_candidate_count"], 6)
 
-    def test_failed_supplement_click_preserves_existing_candidate(self):
+    def test_failed_supplement_click_preserves_highlight_but_clears_recordable_candidate(self):
         with patch.object(MainWindow, "_load", lambda self: None):
             win = MainWindow(ROOT.parent)
         self.addCleanup(win.close)
@@ -407,7 +866,84 @@ class MainWindowWallOpeningsTest(unittest.TestCase):
         effective = win._set_opening_candidate_from_extraction(7, selection, None)
 
         self.assertTrue(np.array_equal(effective, old_mask))
-        self.assertTrue(np.array_equal(win._last_opening_candidate["mask"], old_mask))
+        self.assertIsNone(win._last_opening_candidate)
+
+    def test_load_detections_filters_invalid_detection_payloads(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            data_root = workspace / "scan"
+            data_root.mkdir()
+            pose = CameraPose("608.jpg", 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            out_path = annotation_output_path(workspace, pose.image_name)
+            out_path.parent.mkdir(parents=True)
+            out_path.write_text(
+                json.dumps(
+                    {
+                        "width": 100,
+                        "height": 50,
+                        "detections": [
+                            {"label": "window", "score": 0.9, "bbox": [10, 10, 20, 20]},
+                            {"label": "door"},
+                            {"label": "window", "bbox": [1, 2, 3]},
+                            {"label": "window", "score": "bad", "bbox": [30, 10, 40, 20]},
+                            {"label": "window", "bbox": [5, 25, 15, 20]},
+                        ],
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            with patch.object(MainWindow, "_load", lambda self: None):
+                win = MainWindow(workspace)
+            self.addCleanup(win.close)
+
+            win._load_detections(pose)
+
+            self.assertEqual(len(win.current_detections), 2)
+            self.assertEqual(win.current_detections[0]["bbox"], [10.0, 10.0, 20.0, 20.0])
+            self.assertEqual(win.current_detections[0]["score"], 0.9)
+            self.assertNotIn("score", win.current_detections[1])
+
+    def test_load_detections_handles_invalid_image_size_and_logs_failure(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            data_root = workspace / "scan"
+            data_root.mkdir()
+            pose = CameraPose("608.jpg", 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            out_path = annotation_output_path(workspace, pose.image_name)
+            out_path.parent.mkdir(parents=True)
+            out_path.write_text(
+                json.dumps({"width": "bad", "height": 50, "detections": []}),
+                encoding="utf-8",
+            )
+            with patch.object(MainWindow, "_load", lambda self: None):
+                win = MainWindow(workspace)
+            self.addCleanup(win.close)
+
+            win._load_detections(pose)
+
+            self.assertEqual(win.current_detections, [])
+            self.assertIsNone(win.current_image_size)
+            self.assertIn("尺寸无效", win.lbl_detection.text())
+            events = [
+                json.loads(line)
+                for line in operation_events_path(workspace).read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            self.assertEqual(events[-1]["event"], "detection_load_failed")
+            self.assertEqual(events[-1]["reason"], "invalid_image_size")
+
+    def test_missing_detection_json_prompts_manual_annotation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            pose = CameraPose("608.jpg", 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+            with patch.object(MainWindow, "_load", lambda self: None):
+                win = MainWindow(workspace)
+            self.addCleanup(win.close)
+
+            win._load_detections(pose)
+
+            self.assertIn("编辑当前全景框", win.lbl_detection.text())
 
 
 if __name__ == "__main__":

@@ -24,7 +24,7 @@ from render.camera import Camera
 from render.orbit_camera import OrbitCamera
 from render.pano_sphere import PanoSphere
 from render.point_cloud import PointCloud
-from render.picking import find_nearest_to_mouse
+from render.picking import ScreenPointIndex
 
 
 class SceneView(QWidget):
@@ -58,8 +58,8 @@ class SceneView(QWidget):
     def set_world_points(self, points: np.ndarray, colors: np.ndarray):
         self.gl_window.set_world_points(points, colors)
 
-    def set_keyframe(self, pose: CameraPose, image_path: Path):
-        self.gl_window.set_keyframe(pose, image_path)
+    def set_keyframe(self, pose: CameraPose, image_path: Path, load_pano: bool = True):
+        self.gl_window.set_keyframe(pose, image_path, load_pano=load_pano)
 
     def set_show_pano(self, on: bool):
         self.gl_window.set_show_pano(on)
@@ -82,11 +82,17 @@ class SceneView(QWidget):
     def set_highlight_mask(self, mask: np.ndarray | None):
         self.gl_window.set_highlight_mask(mask)
 
+    def set_highlight_style(self, ring_color, fill_color):
+        self.gl_window.set_highlight_style(ring_color, fill_color)
+
     def set_selected_depth_test(self, on: bool):
         self.gl_window.set_selected_depth_test(on)
 
     def set_pick_mode(self, on: bool):
         self.gl_window.set_pick_mode(on)
+
+    def set_interaction_mode(self, mode: str):
+        self.gl_window.set_interaction_mode(mode)
 
     def set_show_bboxes(self, on: bool):
         self.gl_window.set_show_bboxes(on)
@@ -99,6 +105,9 @@ class SceneView(QWidget):
 
     def set_global_view_mode(self, on: bool):
         self.gl_window.set_global_view_mode(on)
+
+    def consume_point_detection_hit(self) -> tuple[int, float, float]:
+        return self.gl_window.consume_point_detection_hit()
 
     def eventFilter(self, obj, event):
         if obj is self.container and event.type() == QEvent.KeyPress:
@@ -133,18 +142,23 @@ class _SceneGLWindow(QOpenGLWindow):
         self._show_pc = True
         self._show_bboxes = True
         self._pick_mode = False
+        self._interaction_mode = "navigate"
         self._selected_depth_test = False
+        self._selected_ring_color = (1.0, 1.0, 0.0)
+        self._selected_fill_color = (1.0, 0.0, 0.0)
         self._current_pose: CameraPose | None = None
         self._detections: list[dict] = []
         self._detection_image_size = (0, 0)
         self._selected_detection = -1
+        self._last_point_detection_hit = (-1, float("nan"), float("nan"))
 
         self._dragging = False
         self._last_pos = QPoint()
         self._cursor_pos = QPoint(-1, -1)
 
         self._pending_points: tuple[np.ndarray, np.ndarray] | None = None
-        self._pending_pose: tuple[CameraPose, Path] | None = None
+        self._pending_pose: tuple[CameraPose, Path, bool] | None = None
+        self._screen_index = ScreenPointIndex()
 
         self._hover_timer = QTimer(self)
         self._hover_timer.setSingleShot(True)
@@ -154,6 +168,7 @@ class _SceneGLWindow(QOpenGLWindow):
     # ------------- public API -------------
 
     def set_world_points(self, points: np.ndarray, colors: np.ndarray):
+        self._screen_index.clear()
         if self._ctx is None:
             self._pending_points = (points, colors)
         else:
@@ -162,12 +177,13 @@ class _SceneGLWindow(QOpenGLWindow):
                 self.orbit_camera.fit_to_points(points)
             self.update()
 
-    def set_keyframe(self, pose: CameraPose, image_path: Path):
+    def set_keyframe(self, pose: CameraPose, image_path: Path, load_pano: bool = True):
         if self._ctx is None:
-            self._pending_pose = (pose, image_path)
+            self._pending_pose = (pose, image_path, bool(load_pano))
             return
         self._clear_hover()
-        self._pano.load_image(image_path)
+        if load_pano:
+            self._pano.load_image(image_path)
         self._pano.set_pose(pose.roll, pose.pitch, pose.yaw)
         if not self._global_view_mode:
             self.camera.set_keyframe(
@@ -241,8 +257,23 @@ class _SceneGLWindow(QOpenGLWindow):
             self._pc.set_selected_depth_test(self._selected_depth_test)
             self.update()
 
+    def set_highlight_style(self, ring_color, fill_color):
+        self._selected_ring_color = tuple(float(v) for v in ring_color)
+        self._selected_fill_color = tuple(float(v) for v in fill_color)
+        if self._pc is not None:
+            self._pc.set_selected_style(self._selected_ring_color, self._selected_fill_color)
+            self.update()
+
     def set_pick_mode(self, on: bool):
-        self._pick_mode = bool(on)
+        self.set_interaction_mode("point" if on else "navigate")
+
+    def set_interaction_mode(self, mode: str):
+        normalized = str(mode)
+        if normalized not in {"navigate", "point", "detection"}:
+            normalized = "navigate"
+        self._interaction_mode = normalized
+        self._pick_mode = normalized != "navigate"
+        self._last_point_detection_hit = (-1, float("nan"), float("nan"))
         self._clear_hover()
 
     def set_show_bboxes(self, on: bool):
@@ -253,8 +284,14 @@ class _SceneGLWindow(QOpenGLWindow):
         self._detections = list(detections)
         self._detection_image_size = (int(img_w), int(img_h))
         self._selected_detection = -1
+        self._last_point_detection_hit = (-1, float("nan"), float("nan"))
         self._refresh_bbox_overlay()
         self.update()
+
+    def consume_point_detection_hit(self) -> tuple[int, float, float]:
+        hit = self._last_point_detection_hit
+        self._last_point_detection_hit = (-1, float("nan"), float("nan"))
+        return hit
 
     def set_selected_detection(self, idx: int):
         self._selected_detection = int(idx)
@@ -296,6 +333,7 @@ class _SceneGLWindow(QOpenGLWindow):
         self._pano.set_yaw_offset(self._pano_yaw_offset_deg)
         self._pc = PointCloud(self._ctx)
         self._pc.set_selected_depth_test(self._selected_depth_test)
+        self._pc.set_selected_style(self._selected_ring_color, self._selected_fill_color)
         self._bbox_overlay = BboxOverlay(self._ctx)
 
         if self._pending_points is not None:
@@ -304,8 +342,9 @@ class _SceneGLWindow(QOpenGLWindow):
                 self.orbit_camera.fit_to_points(self._pending_points[0])
             self._pending_points = None
         if self._pending_pose is not None:
-            pose, img = self._pending_pose
-            self._pano.load_image(img)
+            pose, img, load_pano = self._pending_pose
+            if load_pano:
+                self._pano.load_image(img)
             self._pano.set_pose(pose.roll, pose.pitch, pose.yaw)
             if not self._global_view_mode:
                 self.camera.set_keyframe(
@@ -355,15 +394,20 @@ class _SceneGLWindow(QOpenGLWindow):
     # ------------- mouse / keyboard -------------
 
     def mousePressEvent(self, e):
-        if e.button() == Qt.LeftButton and self._pick_mode:
+        if e.button() == Qt.LeftButton and self._interaction_mode == "point":
+            pos = e.position().toPoint()
+            self._last_point_detection_hit = self._pick_detection_hit(pos)
+            idx = self._pick_point(pos, max_dist_px=18)
+            if idx >= 0:
+                self.point_clicked.emit(idx)
+                self.set_highlight(idx)
+                return
+            self.point_clicked.emit(idx)
+            return
+        if e.button() == Qt.LeftButton and self._interaction_mode == "detection":
             det_idx, click_u, click_v = self._pick_detection_hit(e.position().toPoint())
             if det_idx >= 0:
                 self.detection_clicked.emit(det_idx, click_u, click_v)
-                return
-            idx = self._pick_point(e.position().toPoint(), max_dist_px=18)
-            self.point_clicked.emit(idx)
-            if idx >= 0:
-                self.set_highlight(idx)
             return
         if e.button() == Qt.LeftButton:
             self._dragging = True
@@ -436,7 +480,7 @@ class _SceneGLWindow(QOpenGLWindow):
         proj = active_camera.proj_matrix(w / h)
         view = active_camera.view_matrix()
         mvp = (proj @ view).astype(np.float32)
-        idx = find_nearest_to_mouse(
+        idx = self._screen_index.find_nearest(
             self._pc.points, mvp, w, h,
             self._cursor_pos.x(), self._cursor_pos.y(), max_dist_px=14,
         )
@@ -463,7 +507,7 @@ class _SceneGLWindow(QOpenGLWindow):
         proj = active_camera.proj_matrix(w / h)
         view = active_camera.view_matrix()
         mvp = (proj @ view).astype(np.float32)
-        return find_nearest_to_mouse(
+        return self._screen_index.find_nearest(
             self._pc.points, mvp, w, h,
             pos.x(), pos.y(), max_dist_px=max_dist_px,
         )

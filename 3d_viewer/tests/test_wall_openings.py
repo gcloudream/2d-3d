@@ -148,6 +148,35 @@ class WallOpeningsTest(unittest.TestCase):
         self.assertEqual(opening.z_min, 0.8)
         self.assertEqual(opening.z_max, 1.6)
 
+    def test_opening_from_selection_rejects_unrecordable_metadata(self):
+        points = np.asarray([
+            [1.0, 0.0, 0.8],
+            [1.0, 0.4, 1.0],
+            [1.0, 0.8, 1.6],
+        ])
+        mask = np.asarray([True, True, True])
+        common = {
+            "source_image": "608.jpg",
+            "seed_index": 1,
+            "confidence": "medium",
+            "plane_point": np.asarray([1.0, 0.4, 1.0]),
+            "plane_normal": np.asarray([1.0, 0.0, 0.0]),
+            "width_m": 0.8,
+            "height_m": 0.8,
+            "detection_index": 2,
+            "score": 0.8,
+        }
+
+        bad_cases = [
+            {"label": "object", "reason": "accepted_vertical_planar_region"},
+            {"label": "window", "reason": "frustum_only_rejected_not_vertical_plane"},
+            {"label": "window", "reason": "frustum_only_too_few_region_points"},
+        ]
+        for bad in bad_cases:
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    opening_from_selection(points, mask, **common, **bad)
+
     def test_wall_openings_path_uses_dataset_name(self):
         path = wall_openings_path(Path("/workspace"), Path("/workspace/scan-a"))
 

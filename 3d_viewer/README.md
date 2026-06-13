@@ -48,12 +48,10 @@ SLAM 轨迹到真实全景相机中心，并把标定 yaw offset 设为默认水
 | 2 | 显隐点云 |
 | R | 重置视角 |
 
-## 门窗检测与手工框
+## 门窗框与点云提取
 
 右侧面板提供门窗相关操作：
 
-- `检测模式`：`精准模式` 用于减少误检，`召回模式` 用于尽量找全门窗。
-- `检测当前帧`：对当前 keyframe 全景图运行 OWLv2 检测，结果保存到 `out/door_window_detections/`。
 - `显示检测框`：在 3D 全景视图中显示/隐藏当前帧检测框。
 - `门窗选择`：开启后点击点云点，如果该点投影落入 door/window 框，先得到 bbox 粗候选点，再按点击点附近的 3D 连通性和深度一致性精修高亮区域。
 - `编辑当前全景框`：在主窗口左侧切换到平铺全景编辑器，不打开浏览器。
@@ -69,7 +67,7 @@ SLAM 轨迹到真实全景相机中心，并把标定 yaw offset 设为默认水
 - 点击 `编辑结束` 保存并返回 3D 视图；
 - 点击 `取消编辑` 放弃本次编辑并返回。
 
-手工框保存到 `out/door_window_annotations/<image_stem>.json`。3D Viewer 会优先读取手工框，其次读取模型检测结果，因此手工修正可以覆盖漏检和误检。
+手工框保存到 `out/door_window_annotations/<image_stem>.json`。3D Viewer 会优先读取手工框，其次兼容读取已有检测 JSON，因此手工修正可以覆盖历史结果里的漏检和误检。主界面不再运行自动检测，缺少框时请使用 `编辑当前全景框` 绘制。
 
 门窗点云提取分两层：全景 bbox 只提供粗范围，最终高亮会用点击点所在的 3D 连通区域和深度一致性做精修。玻璃、屏幕、黑色反光物体附近仍可能因为 LiDAR 点稀疏而低置信度，右侧状态栏会显示 coarse/refined 点数和原因。
 
@@ -82,7 +80,6 @@ SLAM 轨迹到真实全景相机中心，并把标定 yaw offset 设为默认水
 │   ├── annotations.py         手工门窗框 JSON 保存
 │   ├── dataset.py             camera_pos.cam 解析 + LAS 抽样加载
 │   ├── detection_cache.py     检测/手工框缓存路径查找
-│   ├── detection_runner.py    当前帧 OWLv2 检测调用
 │   └── projection.py          rotation_from_angle (与算法例子保持一致)
 ├── render/
 │   ├── camera.py              单一 Camera 对象

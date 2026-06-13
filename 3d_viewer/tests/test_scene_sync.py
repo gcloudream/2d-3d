@@ -12,7 +12,9 @@ sys.path.insert(0, str(ROOT))
 from ui.scene_sync import (
     configure_observer_scene,
     set_scene_pair_highlight_mask,
+    set_scene_pair_highlight_style,
     set_scene_pair_point_size,
+    set_scene_pair_selected_depth_test,
 )
 
 
@@ -43,6 +45,9 @@ class FakeScene:
 
     def set_highlight_mask(self, mask):
         self.calls.append(("set_highlight_mask", mask))
+
+    def set_highlight_style(self, ring_color, fill_color):
+        self.calls.append(("set_highlight_style", tuple(ring_color), tuple(fill_color)))
 
 
 class SceneSyncTest(unittest.TestCase):
@@ -78,6 +83,25 @@ class SceneSyncTest(unittest.TestCase):
 
         self.assertIs(primary.calls[0][1], mask)
         self.assertIs(observer.calls[0][1], mask)
+
+    def test_set_scene_pair_selected_depth_test_updates_both_scenes(self):
+        primary = FakeScene()
+        observer = FakeScene()
+
+        set_scene_pair_selected_depth_test(primary, observer, False)
+
+        self.assertEqual(primary.calls, [("set_selected_depth_test", False)])
+        self.assertEqual(observer.calls, [("set_selected_depth_test", False)])
+
+    def test_set_scene_pair_highlight_style_updates_both_scenes(self):
+        primary = FakeScene()
+        observer = FakeScene()
+
+        set_scene_pair_highlight_style(primary, observer, (0.0, 0.85, 1.0), (0.0, 0.2, 1.0))
+
+        expected = [("set_highlight_style", (0.0, 0.85, 1.0), (0.0, 0.2, 1.0))]
+        self.assertEqual(primary.calls, expected)
+        self.assertEqual(observer.calls, expected)
 
 
 if __name__ == "__main__":

@@ -33,17 +33,14 @@ def project_points_to_screen(
     return sxy, inside
 
 
-def find_nearest_to_mouse(
-    points: np.ndarray, mvp: np.ndarray, width: int, height: int,
-    mouse_x: int, mouse_y: int, max_dist_px: int = 12,
+def _nearest_from_projected(
+    sxy: np.ndarray,
+    inside: np.ndarray,
+    depth: np.ndarray,
+    mouse_x: int,
+    mouse_y: int,
+    max_dist_px: int,
 ) -> int:
-    """返回吸附到的点 index，没有则 -1。
-    在鼠标半径内优先选当前视角更靠前的点，同深度时再按屏幕距离兜底。
-    30 万点 numpy 化查询通常约 20–30 ms，对 30ms 节流的 hover 来说够用。
-    """
-    if len(points) == 0:
-        return -1
-    sxy, inside, depth = _project_points_to_screen_with_depth(points, mvp, width, height)
     if not np.any(inside):
         return -1
 
@@ -60,3 +57,62 @@ def find_nearest_to_mouse(
     candidate_depth = depth[candidate_idx]
     best = int(np.lexsort((candidate_d2, candidate_depth))[0])
     return int(candidate_idx[best])
+
+
+class ScreenPointIndex:
+    """One-view cache of point projections used by hover and click picking."""
+
+    def __init__(self):
+        self._key: tuple[int, int, int, int, bytes] | None = None
+        self._sxy: np.ndarray | None = None
+        self._inside: np.ndarray | None = None
+        self._depth: np.ndarray | None = None
+
+    def clear(self):
+        self._key = None
+        self._sxy = None
+        self._inside = None
+        self._depth = None
+
+    def _cache_key(self, points: np.ndarray, mvp: np.ndarray, width: int, height: int):
+        pts = np.asarray(points)
+        matrix = np.asarray(mvp, dtype=np.float32)
+        return (id(pts), len(pts), int(width), int(height), matrix.tobytes())
+
+    def _projection(self, points: np.ndarray, mvp: np.ndarray, width: int, height: int):
+        key = self._cache_key(points, mvp, width, height)
+        if key != self._key:
+            self._sxy, self._inside, self._depth = _project_points_to_screen_with_depth(
+                points, mvp, width, height,
+            )
+            self._key = key
+        return self._sxy, self._inside, self._depth
+
+    def find_nearest(
+        self,
+        points: np.ndarray,
+        mvp: np.ndarray,
+        width: int,
+        height: int,
+        mouse_x: int,
+        mouse_y: int,
+        max_dist_px: int = 12,
+    ) -> int:
+        if len(points) == 0:
+            return -1
+        sxy, inside, depth = self._projection(points, mvp, width, height)
+        return _nearest_from_projected(sxy, inside, depth, mouse_x, mouse_y, max_dist_px)
+
+
+def find_nearest_to_mouse(
+    points: np.ndarray, mvp: np.ndarray, width: int, height: int,
+    mouse_x: int, mouse_y: int, max_dist_px: int = 12,
+) -> int:
+    """返回吸附到的点 index，没有则 -1。
+    在鼠标半径内优先选当前视角更靠前的点，同深度时再按屏幕距离兜底。
+    30 万点 numpy 化查询通常约 20–30 ms，对 30ms 节流的 hover 来说够用。
+    """
+    if len(points) == 0:
+        return -1
+    sxy, inside, depth = _project_points_to_screen_with_depth(points, mvp, width, height)
+    return _nearest_from_projected(sxy, inside, depth, mouse_x, mouse_y, max_dist_px)
