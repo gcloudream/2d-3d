@@ -16,12 +16,16 @@ from core.wall_model import (
     WallSegment,
     complete_boundary_corner_gaps,
     complete_parallel_return_bridges,
+    export_wall_model_from_wall_lines,
     extract_axis_aligned_wall_segments,
     extract_boundary_outline_wall_segments,
     extract_contour_wall_segments,
     filter_wall_segments_by_network,
     generate_wall_model,
+    generate_wall_lines,
+    load_wall_line_draft,
     recover_short_return_wall_segments,
+    save_wall_line_draft,
     snap_wall_segment_endpoints,
     verify_wall_segments_with_points,
     wall_mask_world_bounds,
@@ -372,6 +376,36 @@ class WallModelTest(unittest.TestCase):
         self.assertEqual(len(vertices), 8)
         self.assertEqual(len(faces), 6)
 
+    def test_converts_free_wall_segment_to_rotated_box_mesh(self):
+        segment = WallSegment(
+            "free",
+            0.0,
+            0.0,
+            3.0,
+            4.0,
+            0.0,
+            2.5,
+            5.0,
+            100,
+            2.5,
+        )
+
+        vertices, faces = wall_segments_to_mesh([segment], wall_thickness_m=0.2)
+
+        self.assertEqual(len(vertices), 8)
+        self.assertEqual(len(faces), 6)
+        bottom = np.asarray(vertices[:4], dtype=np.float64)
+        direction = np.asarray([3.0, 4.0], dtype=np.float64)
+        length = np.linalg.norm(direction)
+        unit = direction / length
+        normal = np.asarray([-unit[1], unit[0]], dtype=np.float64)
+        center_start = np.asarray([0.0, 0.0], dtype=np.float64)
+        offsets = [abs(float(np.dot(point[:2] - center_start, normal))) for point in bottom]
+        self.assertTrue(all(abs(offset - 0.1) < 1e-6 for offset in offsets))
+        projections = sorted(float(np.dot(point[:2] - center_start, unit)) for point in bottom)
+        self.assertAlmostEqual(projections[0], 0.0)
+        self.assertAlmostEqual(projections[-1], 5.0)
+
     def test_matches_wall_opening_to_vertical_segment(self):
         from core.wall_openings import WallOpening
         from core.wall_model import match_wall_openings_to_segments
@@ -602,6 +636,131 @@ class WallModelTest(unittest.TestCase):
             self.assertTrue(result.metadata_path.exists())
             self.assertTrue(result.preview_path.exists())
             self.assertGreaterEqual(result.segment_count, 4)
+
+    def test_generates_wall_line_draft_without_writing_obj(self):
+        xs = np.linspace(0.0, 4.0, 45)
+        ys = np.linspace(0.0, 3.0, 35)
+        zs = np.linspace(0.0, 2.4, 12)
+        points = []
+        for z in zs:
+            for x in xs:
+                points.append([x, 0.0, z])
+                points.append([x, 3.0, z])
+            for y in ys:
+                points.append([0.0, y, z])
+                points.append([4.0, y, z])
+        points = np.asarray(points, dtype=np.float64)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            data_root = workspace / "scan"
+            data_root.mkdir()
+
+            draft = generate_wall_lines(
+                workspace,
+                data_root,
+                points,
+                resolution_m=0.1,
+                min_wall_length_m=1.5,
+            )
+
+            self.assertGreaterEqual(draft.segment_count, 4)
+            self.assertTrue(draft.wall_lines_path.exists())
+            self.assertTrue(draft.topdown_preview_path.exists())
+            self.assertFalse((workspace / "out" / "wall_models" / "scan_walls.obj").exists())
+
+            payload = json.loads(draft.wall_lines_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["schema_version"], 1)
+            self.assertEqual(payload["segment_count"], draft.segment_count)
+            self.assertEqual(len(payload["segments"]), draft.segment_count)
+            self.assertEqual(payload["source"], "auto_detected_wall_lines")
+
+    def test_exports_wall_model_from_loaded_wall_line_draft(self):
+        edited_segment = WallSegment(
+            "horizontal",
+            0.0,
+            1.0,
+            2.0,
+            1.0,
+            0.0,
+            2.4,
+            2.0,
+            12,
+            2.4,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            data_root = workspace / "edited_scan"
+            data_root.mkdir()
+            draft_path = save_wall_line_draft(
+                workspace,
+                data_root,
+                [edited_segment],
+                x_min=-0.5,
+                y_min=0.5,
+                x_max=2.5,
+                y_max=1.5,
+                resolution_m=0.1,
+                source="manual_test",
+            )
+            loaded = load_wall_line_draft(draft_path)
+
+            result = export_wall_model_from_wall_lines(
+                workspace,
+                data_root,
+                loaded,
+                resolution_m=0.1,
+            )
+
+            self.assertTrue(result.obj_path.exists())
+            self.assertTrue(result.metadata_path.exists())
+            self.assertTrue(result.preview_path.exists())
+            self.assertTrue(result.topdown_preview_path.exists())
+            self.assertEqual(result.segment_count, 1)
+
+            payload = json.loads(result.metadata_path.read_text(encoding="utf-8"))
+            self.assertEqual(payload["source_wall_lines"], str(draft_path))
+            self.assertEqual(payload["segments"][0]["x2"], 2.0)
+
+    def test_wall_line_draft_preserves_free_segment_geometry(self):
+        free_segment = WallSegment(
+            "free",
+            0.0,
+            0.0,
+            3.0,
+            4.0,
+            0.0,
+            2.4,
+            5.0,
+            12,
+            2.4,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            data_root = workspace / "free_scan"
+            data_root.mkdir()
+            draft_path = save_wall_line_draft(
+                workspace,
+                data_root,
+                [free_segment],
+                x_min=-0.5,
+                y_min=-0.5,
+                x_max=3.5,
+                y_max=4.5,
+                resolution_m=0.1,
+                source="manual_free",
+            )
+
+            loaded = load_wall_line_draft(draft_path)
+
+        self.assertEqual(loaded.segments[0].orientation, "free")
+        self.assertAlmostEqual(loaded.segments[0].x1, 0.0)
+        self.assertAlmostEqual(loaded.segments[0].y1, 0.0)
+        self.assertAlmostEqual(loaded.segments[0].x2, 3.0)
+        self.assertAlmostEqual(loaded.segments[0].y2, 4.0)
+        self.assertAlmostEqual(loaded.segments[0].length_m, 5.0)
 
     def test_generate_wall_model_includes_opening_metadata(self):
         from core.wall_openings import WallOpening

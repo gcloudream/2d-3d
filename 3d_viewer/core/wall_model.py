@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
-from typing import Iterable
+from typing import Iterable, Mapping
 
 import numpy as np
 from PIL import Image, ImageDraw, ImageOps
@@ -75,6 +75,26 @@ class WallModelResult:
 
 
 @dataclass(frozen=True)
+class WallLineDraft:
+    wall_lines_path: Path
+    topdown_preview_path: Path
+    segments: list[WallSegment]
+    x_min: float
+    y_min: float
+    x_max: float
+    y_max: float
+    resolution_m: float
+    grid_shape: tuple[int, int]
+    grid: np.ndarray | None = None
+    wall_mask: np.ndarray | None = None
+    source: str = "auto_detected_wall_lines"
+
+    @property
+    def segment_count(self) -> int:
+        return len(self.segments)
+
+
+@dataclass(frozen=True)
 class WallOpeningMarker:
     opening_id: str
     label: str
@@ -122,6 +142,82 @@ def generate_wall_model(
     strip_width_m: float = DEFAULT_STRIP_WIDTH_M,
 ) -> WallModelResult:
     """Generate a simple OBJ wall model from sampled point-cloud evidence."""
+    draft = generate_wall_lines(
+        workspace,
+        data_root,
+        points,
+        resolution_m=resolution_m,
+        min_wall_length_m=min_wall_length_m,
+        strip_width_m=strip_width_m,
+    )
+    return export_wall_model_from_wall_lines(
+        workspace,
+        data_root,
+        draft,
+        openings=openings,
+        resolution_m=resolution_m,
+        wall_thickness_m=wall_thickness_m,
+    )
+
+
+def generate_wall_lines(
+    workspace: Path,
+    data_root: Path,
+    points: np.ndarray,
+    *,
+    resolution_m: float = DEFAULT_RESOLUTION_M,
+    min_wall_length_m: float = DEFAULT_MIN_MODEL_WALL_LENGTH_M,
+    strip_width_m: float = DEFAULT_STRIP_WIDTH_M,
+) -> WallLineDraft:
+    """Generate an editable wall-line draft without exporting the OBJ model."""
+    evidence, segments = _detect_wall_segments(
+        points,
+        resolution_m=resolution_m,
+        min_wall_length_m=min_wall_length_m,
+        strip_width_m=strip_width_m,
+    )
+    out_dir = wall_model_output_dir(workspace)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stem = Path(data_root).name or "dataset"
+    wall_lines_path = out_dir / f"{stem}_wall_lines.json"
+    topdown_preview_path = out_dir / f"{stem}_wall_lines_topdown.png"
+    draft = WallLineDraft(
+        wall_lines_path=wall_lines_path,
+        topdown_preview_path=topdown_preview_path,
+        segments=list(segments),
+        x_min=evidence.x_min,
+        y_min=evidence.y_min,
+        x_max=evidence.x_max,
+        y_max=evidence.y_max,
+        resolution_m=resolution_m,
+        grid_shape=tuple(int(v) for v in evidence.grid.shape),
+        grid=evidence.grid,
+        wall_mask=evidence.wall_mask,
+    )
+    render_wall_line_draft_preview(draft).save(topdown_preview_path)
+    save_wall_line_draft(
+        workspace,
+        data_root,
+        draft.segments,
+        x_min=draft.x_min,
+        y_min=draft.y_min,
+        x_max=draft.x_max,
+        y_max=draft.y_max,
+        resolution_m=draft.resolution_m,
+        source=draft.source,
+        grid_shape=draft.grid_shape,
+        topdown_preview_path=topdown_preview_path,
+    )
+    return draft
+
+
+def _detect_wall_segments(
+    points: np.ndarray,
+    *,
+    resolution_m: float,
+    min_wall_length_m: float,
+    strip_width_m: float,
+) -> tuple[_GridEvidence, list[WallSegment]]:
     evidence = _build_grid_evidence(
         points,
         resolution_m=resolution_m,
@@ -209,6 +305,41 @@ def generate_wall_model(
         segments,
         tolerance_m=DEFAULT_CONNECTION_TOLERANCE_M,
     )
+    return evidence, segments
+
+
+def export_wall_model_from_wall_lines(
+    workspace: Path,
+    data_root: Path,
+    wall_lines: WallLineDraft | Iterable[WallSegment],
+    *,
+    openings: Iterable[WallOpening] | None = None,
+    resolution_m: float | None = None,
+    wall_thickness_m: float = DEFAULT_WALL_THICKNESS_M,
+) -> WallModelResult:
+    """Export OBJ/preview artifacts from confirmed wall-line geometry."""
+    if isinstance(wall_lines, WallLineDraft):
+        draft = wall_lines
+        segments = list(draft.segments)
+        effective_resolution_m = float(resolution_m or draft.resolution_m)
+    else:
+        segments = [_normalize_wall_segment(segment) for segment in wall_lines]
+        effective_resolution_m = float(resolution_m or DEFAULT_RESOLUTION_M)
+        x_min, y_min, x_max, y_max = _segments_world_bounds(segments, margin_m=effective_resolution_m * 4)
+        out_dir = wall_model_output_dir(workspace)
+        stem = Path(data_root).name or "dataset"
+        draft = WallLineDraft(
+            wall_lines_path=out_dir / f"{stem}_wall_lines.json",
+            topdown_preview_path=out_dir / f"{stem}_wall_lines_topdown.png",
+            segments=segments,
+            x_min=x_min,
+            y_min=y_min,
+            x_max=x_max,
+            y_max=y_max,
+            resolution_m=effective_resolution_m,
+            grid_shape=_grid_shape_from_bounds(x_min, y_min, x_max, y_max, effective_resolution_m),
+            source="provided_wall_lines",
+        )
     opening_records = list(openings or [])
     opening_markers, unmatched_openings = match_wall_openings_to_segments(
         opening_records,
@@ -260,18 +391,14 @@ def generate_wall_model(
         vertex_count=len(vertices),
         face_count=len(faces),
         wall_thickness_m=wall_thickness_m,
-        resolution_m=resolution_m,
+        resolution_m=effective_resolution_m,
         opening_markers=opening_markers,
         projected_openings=projected_openings,
         unmatched_openings=unmatched_openings,
+        source_wall_lines=draft.wall_lines_path,
     )
-    render_wall_model_topdown_preview(
-        evidence.grid,
-        evidence.wall_mask,
-        segments,
-        evidence.x_min,
-        evidence.y_min,
-        resolution_m,
+    render_wall_line_draft_preview(
+        draft,
         opening_markers=opening_markers,
         projected_openings=projected_openings,
     ).save(topdown_preview_path)
@@ -288,6 +415,148 @@ def generate_wall_model(
         matched_opening_count=len(opening_markers),
         projected_opening_count=len(projected_openings),
         unmatched_opening_count=len(unmatched_openings),
+    )
+
+
+def save_wall_line_draft(
+    workspace: Path,
+    data_root: Path,
+    segments: Iterable[WallSegment],
+    *,
+    x_min: float,
+    y_min: float,
+    x_max: float,
+    y_max: float,
+    resolution_m: float,
+    source: str = "manual_wall_lines",
+    grid_shape: tuple[int, int] | None = None,
+    topdown_preview_path: Path | None = None,
+) -> Path:
+    """Persist editable wall-line geometry as the source of truth for OBJ export."""
+    out_dir = wall_model_output_dir(workspace)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stem = Path(data_root).name or "dataset"
+    wall_lines_path = out_dir / f"{stem}_wall_lines.json"
+    preview_path = topdown_preview_path or out_dir / f"{stem}_wall_lines_topdown.png"
+    normalized = [_normalize_wall_segment(segment) for segment in segments]
+    shape = grid_shape or _grid_shape_from_bounds(x_min, y_min, x_max, y_max, resolution_m)
+    payload = {
+        "schema_version": 1,
+        "source": source,
+        "data_root": str(data_root),
+        "topdown_preview": str(preview_path),
+        "resolution_m": float(resolution_m),
+        "bounds": {
+            "x_min": float(x_min),
+            "y_min": float(y_min),
+            "x_max": float(x_max),
+            "y_max": float(y_max),
+        },
+        "grid_shape": [int(shape[0]), int(shape[1])],
+        "segment_count": len(normalized),
+        "segments": [
+            {
+                "id": f"wall-{index + 1:04d}",
+                "edited": source != "auto_detected_wall_lines",
+                **_wall_segment_to_dict(segment),
+            }
+            for index, segment in enumerate(normalized)
+        ],
+    }
+    wall_lines_path.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return wall_lines_path
+
+
+def load_wall_line_draft(path: Path) -> WallLineDraft:
+    """Load editable wall-line geometry saved by :func:`save_wall_line_draft`."""
+    draft_path = Path(path)
+    payload = json.loads(draft_path.read_text(encoding="utf-8"))
+    if payload.get("schema_version") != 1:
+        raise ValueError("unsupported wall line draft schema")
+    bounds = payload.get("bounds") or {}
+    resolution_m = float(payload.get("resolution_m", DEFAULT_RESOLUTION_M))
+    segments = [
+        _wall_segment_from_mapping(raw)
+        for raw in payload.get("segments", [])
+    ]
+    grid_shape_raw = payload.get("grid_shape")
+    if grid_shape_raw and len(grid_shape_raw) == 2:
+        grid_shape = (int(grid_shape_raw[0]), int(grid_shape_raw[1]))
+    else:
+        grid_shape = _grid_shape_from_bounds(
+            float(bounds.get("x_min", 0.0)),
+            float(bounds.get("y_min", 0.0)),
+            float(bounds.get("x_max", 0.0)),
+            float(bounds.get("y_max", 0.0)),
+            resolution_m,
+        )
+    return WallLineDraft(
+        wall_lines_path=draft_path,
+        topdown_preview_path=Path(payload.get("topdown_preview", draft_path.with_name(f"{draft_path.stem}_topdown.png"))),
+        segments=segments,
+        x_min=float(bounds.get("x_min", 0.0)),
+        y_min=float(bounds.get("y_min", 0.0)),
+        x_max=float(bounds.get("x_max", 0.0)),
+        y_max=float(bounds.get("y_max", 0.0)),
+        resolution_m=resolution_m,
+        grid_shape=grid_shape,
+        source=str(payload.get("source", "loaded_wall_lines")),
+    )
+
+
+def render_wall_line_draft_preview(
+    draft: WallLineDraft,
+    *,
+    opening_markers: list[WallOpeningMarker] | None = None,
+    projected_openings: list[WallOpening] | None = None,
+) -> Image.Image:
+    """Render the current editable wall-line draft on its top-down backdrop."""
+    return _render_wall_line_draft(
+        draft,
+        segments=draft.segments,
+        opening_markers=opening_markers,
+        projected_openings=projected_openings,
+    )
+
+
+def render_wall_line_draft_background(draft: WallLineDraft) -> Image.Image:
+    """Render only the non-editable top-down evidence layer for line editing."""
+    return _render_wall_line_draft(draft, segments=[])
+
+
+def _render_wall_line_draft(
+    draft: WallLineDraft,
+    *,
+    segments: list[WallSegment],
+    opening_markers: list[WallOpeningMarker] | None = None,
+    projected_openings: list[WallOpening] | None = None,
+) -> Image.Image:
+    if draft.grid is not None and draft.wall_mask is not None:
+        return render_wall_model_topdown_preview(
+            draft.grid,
+            draft.wall_mask,
+            segments,
+            draft.x_min,
+            draft.y_min,
+            draft.resolution_m,
+            opening_markers=opening_markers,
+            projected_openings=projected_openings,
+        )
+    height_px, width_px = draft.grid_shape
+    grid = np.zeros((max(1, height_px), max(1, width_px)), dtype=np.uint32)
+    wall_mask = np.zeros_like(grid, dtype=bool)
+    return render_wall_model_topdown_preview(
+        grid,
+        wall_mask,
+        segments,
+        draft.x_min,
+        draft.y_min,
+        draft.resolution_m,
+        opening_markers=opening_markers,
+        projected_openings=projected_openings,
     )
 
 
@@ -838,6 +1107,8 @@ def match_wall_openings_to_segments(
         bbox_min = np.asarray(opening.bbox_min, dtype=np.float64)
         bbox_max = np.asarray(opening.bbox_max, dtype=np.float64)
         for index, seg in enumerate(segments):
+            if seg.orientation not in {"vertical", "horizontal"}:
+                continue
             if seg.orientation == "vertical":
                 axis_min, axis_max = sorted((float(bbox_min[1]), float(bbox_max[1])))
                 seg_min, seg_max = sorted((seg.y1, seg.y2))
@@ -1058,18 +1329,30 @@ def wall_segments_to_mesh(
     vertices: list[tuple[float, float, float]] = []
     faces: list[tuple[int, int, int, int]] = []
     half = float(wall_thickness_m) / 2.0
-    for seg in segments:
-        if seg.orientation == "vertical":
-            x1, x2 = seg.x1 - half, seg.x1 + half
-            y1, y2 = sorted((seg.y1, seg.y2))
-        else:
-            x1, x2 = sorted((seg.x1, seg.x2))
-            y1, y2 = seg.y1 - half, seg.y1 + half
-        z1, z2 = seg.z_min, seg.z_max
+    for raw_segment in segments:
+        seg = _normalize_wall_segment(raw_segment)
+        dx = seg.x2 - seg.x1
+        dy = seg.y2 - seg.y1
+        length = float((dx * dx + dy * dy) ** 0.5)
+        if length <= 1e-9:
+            continue
+        normal_x = -dy / length
+        normal_y = dx / length
+        z1, z2 = sorted((seg.z_min, seg.z_max))
+        p1_left = (seg.x1 + normal_x * half, seg.y1 + normal_y * half, z1)
+        p2_left = (seg.x2 + normal_x * half, seg.y2 + normal_y * half, z1)
+        p2_right = (seg.x2 - normal_x * half, seg.y2 - normal_y * half, z1)
+        p1_right = (seg.x1 - normal_x * half, seg.y1 - normal_y * half, z1)
         base = len(vertices) + 1
         vertices.extend([
-            (x1, y1, z1), (x2, y1, z1), (x2, y2, z1), (x1, y2, z1),
-            (x1, y1, z2), (x2, y1, z2), (x2, y2, z2), (x1, y2, z2),
+            p1_left,
+            p2_left,
+            p2_right,
+            p1_right,
+            (p1_left[0], p1_left[1], z2),
+            (p2_left[0], p2_left[1], z2),
+            (p2_right[0], p2_right[1], z2),
+            (p1_right[0], p1_right[1], z2),
         ])
         faces.extend([
             (base + 0, base + 1, base + 2, base + 3),
@@ -1391,6 +1674,131 @@ def _segment_near_boundary(
     return abs(seg.y1 - y_min) <= tolerance_m or abs(seg.y1 - y_max) <= tolerance_m
 
 
+def _normalize_wall_segment(segment: WallSegment) -> WallSegment:
+    orientation = str(segment.orientation)
+    if orientation == "vertical":
+        x = float((segment.x1 + segment.x2) / 2.0)
+        y1 = float(segment.y1)
+        y2 = float(segment.y2)
+        length = abs(y2 - y1)
+        x1 = x2 = x
+    elif orientation == "horizontal":
+        y = float((segment.y1 + segment.y2) / 2.0)
+        x1 = float(segment.x1)
+        x2 = float(segment.x2)
+        length = abs(x2 - x1)
+        y1 = y2 = y
+    elif orientation == "free":
+        x1 = float(segment.x1)
+        y1 = float(segment.y1)
+        x2 = float(segment.x2)
+        y2 = float(segment.y2)
+        length = float(((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5)
+    else:
+        x1 = float(segment.x1)
+        y1 = float(segment.y1)
+        x2 = float(segment.x2)
+        y2 = float(segment.y2)
+        orientation = _wall_segment_orientation_from_points(x1, y1, x2, y2)
+        length = float(((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5)
+    if length <= 0.0:
+        raise ValueError("wall segment length must be positive")
+    return WallSegment(
+        orientation,
+        x1,
+        y1,
+        x2,
+        y2,
+        float(segment.z_min),
+        float(segment.z_max),
+        float(length),
+        int(segment.point_count),
+        float(segment.height_span_m),
+    )
+
+
+def _wall_segment_orientation_from_points(
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    *,
+    tolerance: float = 1e-6,
+) -> str:
+    if abs(x2 - x1) <= tolerance:
+        return "vertical"
+    if abs(y2 - y1) <= tolerance:
+        return "horizontal"
+    return "free"
+
+
+def _wall_segment_to_dict(segment: WallSegment) -> dict:
+    normalized = _normalize_wall_segment(segment)
+    return {
+        "orientation": normalized.orientation,
+        "x1": normalized.x1,
+        "y1": normalized.y1,
+        "x2": normalized.x2,
+        "y2": normalized.y2,
+        "z_min": normalized.z_min,
+        "z_max": normalized.z_max,
+        "length_m": normalized.length_m,
+        "point_count": normalized.point_count,
+        "height_span_m": normalized.height_span_m,
+    }
+
+
+def _wall_segment_from_mapping(raw: Mapping[str, object]) -> WallSegment:
+    orientation = str(raw.get("orientation", ""))
+    segment = WallSegment(
+        orientation,
+        float(raw.get("x1", 0.0)),
+        float(raw.get("y1", 0.0)),
+        float(raw.get("x2", 0.0)),
+        float(raw.get("y2", 0.0)),
+        float(raw.get("z_min", 0.0)),
+        float(raw.get("z_max", 2.6)),
+        float(raw.get("length_m", 0.0)),
+        int(raw.get("point_count", 0)),
+        float(raw.get("height_span_m", 0.0)),
+    )
+    return _normalize_wall_segment(segment)
+
+
+def _segments_world_bounds(
+    segments: Iterable[WallSegment],
+    *,
+    margin_m: float,
+) -> tuple[float, float, float, float]:
+    values = list(segments)
+    if not values:
+        return -1.0, -1.0, 1.0, 1.0
+    xs: list[float] = []
+    ys: list[float] = []
+    for segment in values:
+        xs.extend([float(segment.x1), float(segment.x2)])
+        ys.extend([float(segment.y1), float(segment.y2)])
+    return (
+        min(xs) - margin_m,
+        min(ys) - margin_m,
+        max(xs) + margin_m,
+        max(ys) + margin_m,
+    )
+
+
+def _grid_shape_from_bounds(
+    x_min: float,
+    y_min: float,
+    x_max: float,
+    y_max: float,
+    resolution_m: float,
+) -> tuple[int, int]:
+    resolution = max(float(resolution_m), 1e-6)
+    width_px = max(1, int(np.ceil((float(x_max) - float(x_min)) / resolution)) + 1)
+    height_px = max(1, int(np.ceil((float(y_max) - float(y_min)) / resolution)) + 1)
+    return height_px, width_px
+
+
 def _snap_vertical_endpoint(
     x: float,
     y: float,
@@ -1436,7 +1844,12 @@ def _copy_segment_geometry(
     x2: float,
     y2: float,
 ) -> WallSegment:
-    length = abs(y2 - y1) if source.orientation == "vertical" else abs(x2 - x1)
+    if source.orientation == "vertical":
+        length = abs(y2 - y1)
+    elif source.orientation == "horizontal":
+        length = abs(x2 - x1)
+    else:
+        length = float(((float(x2) - float(x1)) ** 2 + (float(y2) - float(y1)) ** 2) ** 0.5)
     return WallSegment(
         source.orientation,
         float(x1),
@@ -1655,6 +2068,7 @@ def _write_metadata(
     opening_markers: list[WallOpeningMarker] | None = None,
     projected_openings: list[WallOpening] | None = None,
     unmatched_openings: list[dict] | None = None,
+    source_wall_lines: Path | None = None,
 ) -> None:
     path.write_text(
         json.dumps(
@@ -1662,6 +2076,7 @@ def _write_metadata(
                 "obj": str(obj_path),
                 "preview": str(preview_path),
                 "topdown_preview": str(topdown_preview_path),
+                "source_wall_lines": str(source_wall_lines) if source_wall_lines else None,
                 "segment_count": len(segments),
                 "vertex_count": vertex_count,
                 "face_count": face_count,
