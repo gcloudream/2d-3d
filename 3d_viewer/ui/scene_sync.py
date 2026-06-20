@@ -13,6 +13,7 @@ class SceneLike(Protocol):
     def set_pick_mode(self, on: bool): ...
     def set_point_size(self, size: float): ...
     def set_highlight_mask(self, mask: np.ndarray | None): ...
+    def set_highlight_style(self, ring_color, fill_color): ...
     def set_selected_depth_test(self, on: bool): ...
 
 
@@ -40,3 +41,23 @@ def set_scene_pair_highlight_mask(
 ):
     primary.set_highlight_mask(mask)
     observer.set_highlight_mask(mask)
+
+
+def set_scene_pair_selected_depth_test(
+    primary: SceneLike,
+    observer: SceneLike,
+    on: bool,
+):
+    value = bool(on)
+    primary.set_selected_depth_test(value)
+    observer.set_selected_depth_test(value)
+
+
+def set_scene_pair_highlight_style(
+    primary: SceneLike,
+    observer: SceneLike,
+    ring_color,
+    fill_color,
+):
+    primary.set_highlight_style(ring_color, fill_color)
+    observer.set_highlight_style(ring_color, fill_color)

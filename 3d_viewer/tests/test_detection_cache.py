@@ -44,12 +44,12 @@ class DetectionCacheTest(unittest.TestCase):
             workspace / "out" / "door_window_detections" / "608.675997_IMG.json",
         )
 
-    def test_recall_mode_uses_separate_cache_file(self):
+    def test_candidates_do_not_include_recall_mode_cache(self):
         workspace = Path("/tmp/work")
-        out = detection_output_path(workspace, "608.675997_IMG.jpg", mode="recall")
-        self.assertEqual(
-            out,
+        candidates = detection_json_candidates(workspace, "608.675997_IMG.jpg")
+        self.assertNotIn(
             workspace / "out" / "door_window_detections" / "608.675997_IMG_recall.json",
+            candidates,
         )
 
     def test_annotation_cache_takes_priority_over_detection_cache(self):

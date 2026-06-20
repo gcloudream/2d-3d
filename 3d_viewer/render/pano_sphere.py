@@ -13,6 +13,9 @@ from PIL import Image
 from core.projection import rotation_from_angle
 
 
+MAX_PANO_TEXTURE_WIDTH = 4096
+
+
 _VERT_SRC = """
 #version 330
 uniform mat4 mvp;
@@ -113,8 +116,11 @@ class PanoSphere:
         if self._loaded_path == path and self.tex is not None:
             return
         img = Image.open(path).convert("RGBA")
-        if img.width > 4096:
-            target = (4096, max(1, round(img.height * 4096 / img.width)))
+        if img.width > MAX_PANO_TEXTURE_WIDTH:
+            target = (
+                MAX_PANO_TEXTURE_WIDTH,
+                max(1, round(img.height * MAX_PANO_TEXTURE_WIDTH / img.width)),
+            )
             img = img.resize(target, Image.Resampling.LANCZOS)
         # Equirectangular 顶部对应 phi=0（北极），与公式一致。
         # PIL 第一行就是图像顶行；ModernGL 采样 v=0 读上传数据第一行。
@@ -127,7 +133,10 @@ class PanoSphere:
         # shader 已经对 u_pix 做 mod；这里用 clamp 避免 macOS/Qt 上 NPOT+repeat 被判成不可采样。
         self.tex.repeat_x = False
         self.tex.repeat_y = False
-        self.tex.filter = (moderngl.LINEAR, moderngl.LINEAR)
+        # 保持纹理链完整，降低 macOS OpenGL 兼容层对高分辨率纹理的采样风险。
+        # 资源必须在各自窗口的 current context 内上传，见 scene_view.py。
+        self.tex.build_mipmaps()
+        self.tex.filter = (moderngl.LINEAR_MIPMAP_LINEAR, moderngl.LINEAR)
         self.img_w = float(w)
         self.img_h = float(h)
         self._loaded_path = path

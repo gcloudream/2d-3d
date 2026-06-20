@@ -22,7 +22,7 @@ WORKSPACE = HERE.parent  # /Users/gengchen/Desktop/3dtiqu
 
 def main() -> int:
     app = QApplication(sys.argv)
-    win = MainWindow(WORKSPACE)
+    win = MainWindow(WORKSPACE, prompt_for_dataset=True)
     win.show()
     return app.exec()
 

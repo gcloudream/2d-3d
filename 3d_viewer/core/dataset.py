@@ -69,23 +69,31 @@ def find_default_dataset(workspace: Path) -> "Dataset | None":
     return cfg
 
 
+def dataset_config_from_root(data_root: Path) -> "_Config | None":
+    """Build a dataset config from a user-selected scan data directory."""
+    root = Path(data_root)
+    if not root.is_dir():
+        return None
+    cam = root / "CAM" / "camera_pos.cam"
+    if not cam.exists():
+        return None
+    las_candidates = [
+        root / "LAS_Rgb" / f"{root.name}_rgb_0.las",
+        root / "LAS_resample" / f"{root.name}_rgb_0.las",
+        root / "LAS" / f"{root.name}.las",
+    ]
+    las = next((p for p in las_candidates if p.exists()), None)
+    if las is None:
+        return None
+    return _Config(root, cam, root / "CAM", las)
+
+
 def _default_config(workspace: Path) -> "_Config | None":
     # 在 workspace 下找第一个有 CAM/camera_pos.cam 的目录
     for root in sorted(workspace.iterdir()):
-        if not root.is_dir():
-            continue
-        cam = root / "CAM" / "camera_pos.cam"
-        if not cam.exists():
-            continue
-        las_candidates = [
-            root / "LAS_Rgb" / f"{root.name}_rgb_0.las",
-            root / "LAS_resample" / f"{root.name}_rgb_0.las",
-            root / "LAS" / f"{root.name}.las",
-        ]
-        las = next((p for p in las_candidates if p.exists()), None)
-        if las is None:
-            continue
-        return _Config(root, cam, root / "CAM", las)
+        cfg = dataset_config_from_root(root)
+        if cfg is not None:
+            return cfg
     return None
 
 

@@ -55,13 +55,15 @@ void main() {
 
 _SELECTED_FRAG_SRC = """
 #version 330
+uniform vec3 ring_color;
+uniform vec3 fill_color;
 out vec4 frag;
 void main() {
     vec2 c = gl_PointCoord - vec2(0.5);
     float d = length(c);
     if (d > 0.5) discard;
-    if (d > 0.38) frag = vec4(1.0, 1.0, 0.0, 1.0);
-    else          frag = vec4(1.0, 0.0, 0.0, 1.0);
+    if (d > 0.38) frag = vec4(ring_color, 1.0);
+    else          frag = vec4(fill_color, 1.0);
 }
 """
 
@@ -86,9 +88,15 @@ class PointCloud:
         self.point_size = 2.0
         self.highlight = -1
         self.selected_depth_test = False
+        self.selected_ring_color = (1.0, 1.0, 0.0)
+        self.selected_fill_color = (1.0, 0.0, 0.0)
 
     def set_selected_depth_test(self, on: bool):
         self.selected_depth_test = bool(on)
+
+    def set_selected_style(self, ring_color, fill_color):
+        self.selected_ring_color = tuple(float(v) for v in ring_color)
+        self.selected_fill_color = tuple(float(v) for v in fill_color)
 
     def upload(self, points: np.ndarray, colors: np.ndarray):
         for buf in (self.vbo_pos, self.vbo_col):
@@ -153,6 +161,8 @@ class PointCloud:
         if self.selected_vao is not None and self.selected_n > 0:
             self.selected_prog["mvp"].write(mvp.T.tobytes())
             self.selected_prog["point_size"].value = max(8.0, float(self.point_size) * 5.0)
+            self.selected_prog["ring_color"].value = self.selected_ring_color
+            self.selected_prog["fill_color"].value = self.selected_fill_color
             if not self.selected_depth_test:
                 self.ctx.disable(moderngl.DEPTH_TEST)
                 self.selected_vao.render(mode=moderngl.POINTS)
