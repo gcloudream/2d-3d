@@ -5,6 +5,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -16,7 +17,8 @@ from PySide6.QtCore import QPointF
 from PySide6.QtGui import QImage
 from PySide6.QtWidgets import QApplication
 
-from core.wall_model import WallLineDraft, WallSegment, render_wall_line_draft_preview
+from core.wall_model import WallLineDraft, WallOpeningMarker, WallSegment, render_wall_line_draft_preview
+from core.wall_openings import WallOpening, save_wall_openings
 from wall_model_tool import (
     WallLineEditor,
     WallModelWorkbench,
@@ -182,6 +184,99 @@ class WallModelToolTest(unittest.TestCase):
                 if color.red() > 230 and 35 <= color.green() <= 90 and color.blue() < 80:
                     red_pixels += 1
         self.assertEqual(red_pixels, 0)
+
+    def test_wall_line_editor_draws_opening_marker_overlay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            draft = WallLineDraft(
+                wall_lines_path=Path(tmp) / "scan_wall_lines.json",
+                topdown_preview_path=Path(tmp) / "scan_wall_lines_topdown.png",
+                segments=[
+                    WallSegment("vertical", 1.0, 0.0, 1.0, 3.0, 0.0, 2.4, 3.0, 10, 2.4),
+                ],
+                x_min=0.0,
+                y_min=0.0,
+                x_max=4.0,
+                y_max=4.0,
+                resolution_m=0.1,
+                grid_shape=(41, 41),
+            )
+            marker = WallOpeningMarker(
+                opening_id="window-0001",
+                label="window",
+                segment_index=0,
+                orientation="vertical",
+                wall_coord=1.0,
+                axis_min=1.0,
+                axis_max=2.0,
+                z_min=0.5,
+                z_max=1.8,
+                side=1.0,
+            )
+            editor = WallLineEditor()
+            self.addCleanup(editor.close)
+            editor.resize(220, 220)
+            editor.set_draft(draft)
+
+            editor.set_opening_overlays([marker], [])
+            image = QImage(editor.size(), QImage.Format_ARGB32)
+            image.fill(0)
+            editor.render(image)
+
+        green_pixels = 0
+        for y in range(image.height()):
+            for x in range(image.width()):
+                color = image.pixelColor(x, y)
+                if color.green() > 200 and color.red() < 80 and color.blue() < 140:
+                    green_pixels += 1
+        self.assertGreater(green_pixels, 0)
+        self.assertEqual(editor.opening_overlay_counts(), (1, 0))
+
+    def test_workbench_loads_recorded_openings_for_wall_line_editor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            data_root = workspace / "scan-a"
+            data_root.mkdir()
+            opening = WallOpening(
+                id="window-0001",
+                label="window",
+                source_image="608.jpg",
+                seed_index=1,
+                point_count=20,
+                confidence="high",
+                reason="accepted_vertical_planar_region",
+                center=(1.05, 1.2, 1.2),
+                normal=(1.0, 0.0, 0.0),
+                bbox_min=(1.02, 0.8, 0.9),
+                bbox_max=(1.08, 1.6, 1.5),
+                width_m=0.8,
+                height_m=0.6,
+                z_min=0.9,
+                z_max=1.5,
+                detection_index=-1,
+                score=None,
+            )
+            save_wall_openings(workspace, data_root, [opening])
+            draft = WallLineDraft(
+                wall_lines_path=workspace / "out" / "wall_models" / "scan-a_wall_lines.json",
+                topdown_preview_path=workspace / "out" / "wall_models" / "scan-a_wall_lines_topdown.png",
+                segments=[
+                    WallSegment("vertical", 1.0, 0.0, 1.0, 3.0, 0.0, 2.4, 3.0, 10, 2.4),
+                ],
+                x_min=0.0,
+                y_min=0.0,
+                x_max=4.0,
+                y_max=4.0,
+                resolution_m=0.1,
+                grid_shape=(41, 41),
+            )
+            workbench = WallModelWorkbench(workspace, max_points=10_000)
+            self.addCleanup(workbench.close)
+            workbench.dataset = SimpleNamespace(data_root=data_root)
+
+            workbench._show_wall_lines(draft)
+
+        self.assertEqual(workbench.line_editor.opening_overlay_counts(), (1, 0))
+        self.assertIn("门窗标记: 1 matched", workbench.info.text())
 
     def test_wall_line_editor_prefers_endpoint_hit_over_line_body_near_handle(self):
         with tempfile.TemporaryDirectory() as tmp:

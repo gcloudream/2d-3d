@@ -5,14 +5,14 @@ import json
 from pathlib import Path
 
 import numpy as np
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QHBoxLayout, QLabel, QListWidget, QMainWindow,
-    QMessageBox, QPushButton, QSlider, QSplitter, QStatusBar, QVBoxLayout, QWidget,
+    QFileDialog, QMessageBox, QPushButton, QSlider, QSplitter, QStatusBar, QVBoxLayout, QWidget,
     QComboBox, QStackedWidget, QStyle,
 )
 
-from core.dataset import CameraPose, Dataset, find_default_dataset, load_dataset
+from core.dataset import CameraPose, Dataset, dataset_config_from_root, find_default_dataset, load_dataset
 from core.app_logging import configure_operation_logging, log_operation
 from core.detection_cache import find_detection_json
 from core.detection_schema import normalize_detections
@@ -30,9 +30,9 @@ from core.projection import rotation_from_angle
 from core.wall_openings import (
     append_wall_opening,
     append_wall_opening_event,
-    clear_wall_opening_session_files,
     is_recordable_opening_metadata,
     opening_from_selection,
+    reset_wall_openings_for_session,
 )
 from render.scene_view import SceneView
 from ui.pano_annotation_editor import PanoAnnotationEditor
@@ -56,7 +56,7 @@ HIGHLIGHT_STYLES = {
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, workspace: Path):
+    def __init__(self, workspace: Path, *, prompt_for_dataset: bool = False):
         super().__init__()
         self.setWindowTitle("3D Viewer — Point Cloud + Panorama")
         self.resize(1500, 940)
@@ -73,15 +73,16 @@ class MainWindow(QMainWindow):
         self._debug_masks: dict[str, np.ndarray] = {}
         self._debug_layer_mode = "off"
         self._last_detection_base_text = "检测: —"
+        self._session_reset_wall_opening_roots: set[Path] = set()
         configure_operation_logging(self.workspace)
         self._log_operation("viewer_initialized", window_title="3D Viewer — Point Cloud + Panorama")
 
-        self.scene = SceneView()
+        self.scene = SceneView(view_name="primary")
         self.scene.set_selected_depth_test(True)
         self.scene.hover_changed.connect(self._on_hover)
         self.scene.point_clicked.connect(self._on_point_clicked)
         self.scene.detection_clicked.connect(self._on_detection_clicked)
-        self.cloud_scene = SceneView()
+        self.cloud_scene = SceneView(view_name="observer")
         self.cloud_scene.set_selected_depth_test(True)
         self.cloud_scene.point_clicked.connect(self._on_cloud_point_clicked)
         self.editor = PanoAnnotationEditor(self.workspace)
@@ -189,7 +190,8 @@ class MainWindow(QMainWindow):
 
         self._build_ui()
         self.setStatusBar(QStatusBar())
-        self._load()
+        if prompt_for_dataset:
+            QTimer.singleShot(0, self._prompt_for_dataset_directory)
 
     def _build_ui(self):
         self.side_panel = QWidget()
@@ -244,17 +246,45 @@ class MainWindow(QMainWindow):
         sp.setSizes([1180, 320])
         self.setCentralWidget(sp)
 
+    def _prompt_for_dataset_directory(self):
+        selected = QFileDialog.getExistingDirectory(
+            self,
+            "选择数据目录",
+            str(self.workspace),
+            QFileDialog.ShowDirsOnly,
+        )
+        if not selected:
+            self.statusBar().showMessage("未选择数据目录")
+            self._log_operation("dataset_selection_canceled", workspace=str(self.workspace))
+            return
+        self._load_selected_dataset(Path(selected))
+
+    def _load_selected_dataset(self, data_root: Path):
+        cfg = dataset_config_from_root(Path(data_root))
+        if cfg is None:
+            self._log_operation(
+                "dataset_selection_invalid",
+                level="warning",
+                data_root=str(data_root),
+            )
+            QMessageBox.warning(
+                self,
+                "数据目录无效",
+                "请选择包含 CAM/camera_pos.cam 和 LAS 点云文件的数据目录。",
+            )
+            self.statusBar().showMessage("数据目录无效")
+            return
+        self._load_dataset_config(cfg, selection_source="selected")
+
     def _load(self):
-        self.statusBar().showMessage("loading dataset…")
-        self._log_operation("dataset_load_started", workspace=str(self.workspace))
+        self._log_operation("dataset_default_load_started", workspace=str(self.workspace))
         try:
             cfg = find_default_dataset(self.workspace)
             if cfg is None:
                 raise RuntimeError(f"no dataset found under {self.workspace}")
-            self.dataset = load_dataset(cfg, max_points=300_000)
         except Exception as e:
             self._log_operation(
-                "dataset_load_failed",
+                "dataset_default_load_failed",
                 level="error",
                 error=e,
                 workspace=str(self.workspace),
@@ -262,9 +292,31 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "加载失败", str(e))
             self.statusBar().showMessage("加载失败")
             return
+        self._load_dataset_config(cfg, selection_source="default")
 
+    def _load_dataset_config(self, cfg, *, selection_source: str):
+        self.statusBar().showMessage("loading dataset…")
+        self._log_operation(
+            "dataset_load_started",
+            workspace=str(self.workspace),
+            data_root=str(cfg.data_root),
+            selection_source=selection_source,
+        )
+        try:
+            self.dataset = load_dataset(cfg, max_points=300_000)
+        except Exception as e:
+            self._log_operation(
+                "dataset_load_failed",
+                level="error",
+                error=e,
+                data_root=str(cfg.data_root),
+                selection_source=selection_source,
+            )
+            QMessageBox.critical(self, "加载失败", str(e))
+            self.statusBar().showMessage("加载失败")
+            return
         d = self.dataset
-        removed_session_files = clear_wall_opening_session_files(self.workspace, d.data_root)
+        reset_paths = self._reset_wall_openings_for_session(d.data_root)
         self._ensure_yaw_offset_value(d.pano_yaw_offset_deg)
         self._set_yaw_offset_value(DEFAULT_PANORAMA_YAW_OFFSET_DEG)
         self.scene.set_world_points(d.points, d.colors)
@@ -289,11 +341,26 @@ class MainWindow(QMainWindow):
             point_count=int(d.points.shape[0]),
             total_points=int(d.total_points),
             sample_step=int(d.sample_step),
-            removed_session_files=removed_session_files,
+            wall_opening_records_reset=True,
+            wall_opening_reset_files=[str(path) for path in reset_paths],
             yaw_offset_deg=float(self.yaw_offset.currentData()),
         )
         if d.poses:
             self.list.setCurrentRow(0)
+
+    def _reset_wall_openings_for_session(self, data_root: Path) -> list[Path]:
+        data_root = Path(data_root)
+        key = data_root.resolve()
+        if key in self._session_reset_wall_opening_roots:
+            return []
+        self._session_reset_wall_opening_roots.add(key)
+        removed = reset_wall_openings_for_session(self.workspace, data_root)
+        self._log_operation(
+            "wall_opening_records_reset",
+            data_root=data_root,
+            removed_files=[str(path) for path in removed],
+        )
+        return removed
 
     def _step(self, delta: int):
         if not self.dataset or not self.dataset.poses:
@@ -1162,6 +1229,7 @@ class MainWindow(QMainWindow):
         self._log_operation("view_changed", view="main", keyframe_index=int(self.current_idx))
 
     def _show_wall_model(self):
+        self.wall_model_view.set_dataset(self.dataset)
         self.view_stack.setCurrentWidget(self.wall_model_view)
         self.side_panel.hide()
         self._sync_workspace_buttons()

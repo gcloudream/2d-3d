@@ -37,7 +37,8 @@ def wall_opening_events_path(workspace: Path, data_root: Path) -> Path:
     return Path(workspace) / "out" / "wall_openings" / f"{Path(data_root).name}_events.jsonl"
 
 
-def clear_wall_opening_session_files(workspace: Path, data_root: Path) -> list[Path]:
+def reset_wall_openings_for_session(workspace: Path, data_root: Path) -> list[Path]:
+    """Remove persisted door/window records so each app launch starts fresh."""
     removed: list[Path] = []
     for path in (wall_openings_path(workspace, data_root), wall_opening_events_path(workspace, data_root)):
         if path.exists():

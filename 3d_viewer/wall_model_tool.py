@@ -38,14 +38,16 @@ from core.wall_model import (
     OBJ_MATERIAL_COLORS,
     WallLineDraft,
     WallModelResult,
+    WallOpeningMarker,
     WallSegment,
     export_wall_model_from_wall_lines,
     generate_wall_lines as build_wall_lines,
+    opening_overlays_for_wall_segments,
     render_wall_line_draft_background,
     render_wall_line_draft_preview,
     save_wall_line_draft,
 )
-from core.wall_openings import load_wall_openings
+from core.wall_openings import WallOpening, load_wall_openings
 from render.orbit_camera import OrbitCamera
 
 
@@ -330,6 +332,8 @@ class WallLineEditor(QWidget):
         self._add_start_world: tuple[float, float] | None = None
         self._add_current_world: tuple[float, float] | None = None
         self._snap_target_world: tuple[float, float] | None = None
+        self._opening_markers: list[WallOpeningMarker] = []
+        self._projected_openings: list[WallOpening] = []
         self._zoom_scale = 1.0
         self._pan_offset = QPointF(0.0, 0.0)
         self._panning = False
@@ -343,6 +347,8 @@ class WallLineEditor(QWidget):
         self._add_start_world = None
         self._add_current_world = None
         self._snap_target_world = None
+        self._opening_markers = []
+        self._projected_openings = []
         self.reset_zoom(update=False)
         self._background = _pil_image_to_pixmap(render_wall_line_draft_background(draft))
         self.update()
@@ -352,6 +358,18 @@ class WallLineEditor(QWidget):
 
     def wall_segments(self) -> list[WallSegment]:
         return list(self._segments)
+
+    def set_opening_overlays(
+        self,
+        opening_markers: list[WallOpeningMarker],
+        projected_openings: list[WallOpening],
+    ):
+        self._opening_markers = list(opening_markers)
+        self._projected_openings = list(projected_openings)
+        self.update()
+
+    def opening_overlay_counts(self) -> tuple[int, int]:
+        return len(self._opening_markers), len(self._projected_openings)
 
     def select_segment(self, index: int | None):
         if index is None or index < 0 or index >= len(self._segments):
@@ -431,6 +449,7 @@ class WallLineEditor(QWidget):
             else:
                 painter.fillRect(image_rect, QColor("#020304"))
         self._draw_segments(painter, image_rect)
+        self._draw_opening_overlays(painter, image_rect)
         if self._snap_target_world is not None:
             target = self._world_to_widget(*self._snap_target_world, image_rect)
             if target is not None:
@@ -580,6 +599,42 @@ class WallLineEditor(QWidget):
             painter.setBrush(QColor("#ffd43b"))
             painter.drawEllipse(p1, 5, 5)
             painter.drawEllipse(p2, 5, 5)
+
+    def _draw_opening_overlays(self, painter: QPainter, image_rect: QRectF):
+        for opening in self._projected_openings:
+            p1 = self._world_to_widget(opening.bbox_min[0], opening.bbox_min[1], image_rect)
+            p2 = self._world_to_widget(opening.bbox_max[0], opening.bbox_max[1], image_rect)
+            if p1 is None or p2 is None:
+                continue
+            rect = QRectF(p1, p2).normalized()
+            outer_pen = QPen(QColor("#ff9623"), 4)
+            outer_pen.setCosmetic(True)
+            painter.setPen(outer_pen)
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(rect)
+            inner_pen = QPen(QColor("#140f05"), 1)
+            inner_pen.setCosmetic(True)
+            painter.setPen(inner_pen)
+            painter.drawRect(rect)
+
+        for marker in self._opening_markers:
+            if marker.orientation == "vertical":
+                p1 = self._world_to_widget(marker.wall_coord, marker.axis_min, image_rect)
+                p2 = self._world_to_widget(marker.wall_coord, marker.axis_max, image_rect)
+            else:
+                p1 = self._world_to_widget(marker.axis_min, marker.wall_coord, image_rect)
+                p2 = self._world_to_widget(marker.axis_max, marker.wall_coord, image_rect)
+            if p1 is None or p2 is None:
+                continue
+            color = QColor("#28e66e") if marker.label == "window" else QColor("#ffcd28")
+            outer_pen = QPen(color, 7)
+            outer_pen.setCosmetic(True)
+            painter.setPen(outer_pen)
+            painter.drawLine(p1, p2)
+            inner_pen = QPen(QColor("#0a140f"), 2)
+            inner_pen.setCosmetic(True)
+            painter.setPen(inner_pen)
+            painter.drawLine(p1, p2)
 
     def _image_rect(self) -> QRectF:
         base = self._base_image_rect()
@@ -876,6 +931,7 @@ class WallModelWorkbench(QWidget):
         self.workspace = Path(workspace)
         self.dataset: Dataset | None = None
         self.wall_line_draft: WallLineDraft | None = None
+        self.wall_openings: list[WallOpening] = []
         self.result: WallModelResult | None = None
 
         self.workspace_label = QLabel(self.workspace.name)
@@ -985,6 +1041,25 @@ class WallModelWorkbench(QWidget):
         previews.addWidget(self.model_view, 1)
         layout.addLayout(previews, 1)
 
+    def set_dataset(self, dataset: Dataset | None):
+        if self.dataset is dataset:
+            return
+        self.dataset = dataset
+        self.wall_line_draft = None
+        self.wall_openings = []
+        self.result = None
+        self.line_editor.set_opening_overlays([], [])
+        self._set_wall_line_actions_enabled(False)
+        if dataset is None:
+            self.info.setText("尚未加载点云")
+            return
+        self.info.setText(
+            f"已加载: {dataset.data_root.name}\n"
+            f"点云: {dataset.points.shape[0]:,}/{dataset.total_points:,} "
+            f"(step {dataset.sample_step})\n"
+            f"LAS: {dataset.pointcloud_file}"
+        )
+
     def load_default_dataset(self):
         self._show_status("正在加载默认点云...")
         QApplication.processEvents()
@@ -992,23 +1067,12 @@ class WallModelWorkbench(QWidget):
             cfg = find_default_dataset(self.workspace)
             if cfg is None:
                 raise RuntimeError(f"no dataset found under {self.workspace}")
-            self.dataset = load_dataset(cfg, max_points=int(self.max_points.value()))
+            self.set_dataset(load_dataset(cfg, max_points=int(self.max_points.value())))
         except Exception as exc:
-            self.dataset = None
-            self.wall_line_draft = None
-            self._set_wall_line_actions_enabled(False)
+            self.set_dataset(None)
             QMessageBox.warning(self, "点云加载失败", str(exc))
             self._show_status("点云加载失败")
             return
-        self.wall_line_draft = None
-        self.result = None
-        self._set_wall_line_actions_enabled(False)
-        self.info.setText(
-            f"已加载: {self.dataset.data_root.name}\n"
-            f"点云: {self.dataset.points.shape[0]:,}/{self.dataset.total_points:,} "
-            f"(step {self.dataset.sample_step})\n"
-            f"LAS: {self.dataset.pointcloud_file}"
-        )
         self._show_status("默认点云已加载")
 
     def generate_wall_lines_action(self) -> bool:
@@ -1155,6 +1219,7 @@ class WallModelWorkbench(QWidget):
 
     def _show_wall_lines(self, draft: WallLineDraft):
         self.line_editor.set_draft(draft)
+        self._load_wall_opening_overlays()
         self.add_line_button.setEnabled(True)
         self.save_lines_button.setEnabled(True)
         self.zoom_in_button.setEnabled(True)
@@ -1162,10 +1227,12 @@ class WallModelWorkbench(QWidget):
         self.reset_zoom_button.setEnabled(True)
         self.export_obj_button.setEnabled(draft.segment_count > 0)
         self.delete_line_button.setEnabled(draft.segment_count > 0)
+        matched_count, projected_count = self.line_editor.opening_overlay_counts()
         self.info.setText(
             f"墙体线: {draft.wall_lines_path}\n"
             f"墙体线图: {draft.topdown_preview_path}\n"
             f"墙体段数: {draft.segment_count}\n"
+            f"门窗标记: {matched_count} matched · {projected_count} projected\n"
             "确认或编辑墙体线后，再点击“从墙体线生成 OBJ”。"
         )
         self._show_status(f"墙体线已生成: {draft.segment_count} 段")
@@ -1193,6 +1260,7 @@ class WallModelWorkbench(QWidget):
         self.export_obj_button.setEnabled(has_lines)
         self.save_lines_button.setEnabled(self.wall_line_draft is not None)
         self.delete_line_button.setEnabled(has_lines)
+        self._refresh_wall_opening_overlays()
 
     def _on_wall_line_edit_finished(self, action: str):
         self._log_operation(
@@ -1209,6 +1277,23 @@ class WallModelWorkbench(QWidget):
         self.zoom_in_button.setEnabled(bool(enabled))
         self.zoom_out_button.setEnabled(bool(enabled))
         self.reset_zoom_button.setEnabled(bool(enabled))
+
+    def _load_wall_opening_overlays(self):
+        if self.dataset is None:
+            self.wall_openings = []
+        else:
+            self.wall_openings = load_wall_openings(self.workspace, self.dataset.data_root)
+        self._refresh_wall_opening_overlays()
+
+    def _refresh_wall_opening_overlays(self):
+        if not self.wall_openings:
+            self.line_editor.set_opening_overlays([], [])
+            return
+        markers, projected, _unmatched = opening_overlays_for_wall_segments(
+            self.wall_openings,
+            self.line_editor.wall_segments(),
+        )
+        self.line_editor.set_opening_overlays(markers, projected)
 
     def _show_status(self, message: str):
         self.status_changed.emit(message)

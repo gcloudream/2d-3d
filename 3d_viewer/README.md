@@ -32,7 +32,7 @@ cd /Users/gengchen/Desktop/3dtiqu
 .venv/bin/python 3d_viewer/main.py
 ```
 
-默认从工作区里查找第一个含 `CAM/camera_pos.cam` 的目录。如果数据目录含
+启动后会弹出目录选择框，请选择包含 `CAM/camera_pos.cam` 的数据目录。如果数据目录含
 `CALIBRATION_CAMERA/CAMERA_PANO_*.yaml`，会自动使用全景相机外参修正
 SLAM 轨迹到真实全景相机中心，并把标定 yaw offset 设为默认水平校准。
 

@@ -10,10 +10,28 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from core.dataset import CameraPose, apply_pano_calibration, load_pano_calibration
+from core.dataset import CameraPose, apply_pano_calibration, dataset_config_from_root, load_pano_calibration
 
 
 class DatasetCalibrationTest(unittest.TestCase):
+    def test_builds_dataset_config_from_selected_data_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "scan-a"
+            (root / "CAM").mkdir(parents=True)
+            (root / "LAS_Rgb").mkdir()
+            camera_file = root / "CAM" / "camera_pos.cam"
+            las_file = root / "LAS_Rgb" / "scan-a_rgb_0.las"
+            camera_file.write_text("", encoding="utf-8")
+            las_file.write_bytes(b"")
+
+            cfg = dataset_config_from_root(root)
+
+        self.assertIsNotNone(cfg)
+        self.assertEqual(cfg.data_root, root)
+        self.assertEqual(cfg.camera_file, camera_file)
+        self.assertEqual(cfg.image_dir, root / "CAM")
+        self.assertEqual(cfg.pointcloud_file, las_file)
+
     def test_loads_panorama_camera_calibration_from_dataset_root(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

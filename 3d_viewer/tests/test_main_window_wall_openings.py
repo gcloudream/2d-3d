@@ -37,6 +37,52 @@ class MainWindowWallOpeningsTest(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
+    def test_startup_schedules_dataset_directory_picker_without_default_scan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            with patch("ui.main_window.find_default_dataset") as find_default, \
+                patch("ui.main_window.QTimer.singleShot") as single_shot:
+                win = MainWindow(workspace, prompt_for_dataset=True)
+            self.addCleanup(win.close)
+
+        find_default.assert_not_called()
+        self.assertIsNone(win.dataset)
+        single_shot.assert_called_once()
+        self.assertEqual(single_shot.call_args.args[0], 0)
+
+    def test_dataset_picker_loads_selected_directory_instead_of_default_workspace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            data_root = workspace / "chosen_scan"
+            data_root.mkdir()
+            dataset = Dataset(
+                data_root=data_root,
+                camera_file=data_root / "CAM" / "camera_pos.cam",
+                image_dir=data_root / "CAM",
+                pointcloud_file=data_root / "LAS_Rgb" / "chosen_scan_rgb_0.las",
+                poses=[],
+                points=np.asarray([[1.0, 0.0, 0.8]], dtype=np.float64),
+                colors=np.zeros((1, 3), dtype=np.uint8),
+                total_points=1,
+                sample_step=1,
+                pano_calibration=None,
+                pano_yaw_offset_deg=-90.0,
+            )
+            cfg = SimpleNamespace(data_root=data_root)
+
+            with patch("ui.main_window.find_default_dataset") as find_default, \
+                patch("ui.main_window.dataset_config_from_root", return_value=cfg) as selected_config, \
+                patch("ui.main_window.load_dataset", return_value=dataset) as load, \
+                patch("ui.main_window.QFileDialog.getExistingDirectory", return_value=str(data_root)):
+                win = MainWindow(workspace, prompt_for_dataset=False)
+                win._prompt_for_dataset_directory()
+            self.addCleanup(win.close)
+
+        find_default.assert_not_called()
+        selected_config.assert_called_once_with(data_root)
+        load.assert_called_once_with(cfg, max_points=300_000)
+        self.assertEqual(win.dataset.data_root, data_root)
+
     def test_record_current_opening_saves_last_highlight(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
@@ -195,7 +241,7 @@ class MainWindowWallOpeningsTest(unittest.TestCase):
             self.assertEqual(load_wall_openings(workspace, data_root), [])
             self.assertFalse(wall_opening_events_path(workspace, data_root).exists())
 
-    def test_load_clears_previous_wall_opening_session_files(self):
+    def test_selected_dataset_load_resets_wall_opening_records_for_new_session(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
             data_root = workspace / "scan"
@@ -239,12 +285,14 @@ class MainWindowWallOpeningsTest(unittest.TestCase):
             save_wall_openings(workspace, other_root, [opening])
             append_wall_opening_event(workspace, other_root, {"event": "record_opening_saved"})
 
-            with patch("ui.main_window.find_default_dataset", return_value=object()), \
+            cfg = SimpleNamespace(data_root=data_root)
+            with patch("ui.main_window.dataset_config_from_root", return_value=cfg), \
                 patch("ui.main_window.load_dataset", return_value=dataset):
-                win = MainWindow(workspace)
+                win = MainWindow(workspace, prompt_for_dataset=False)
+                win._load_selected_dataset(data_root)
             self.addCleanup(win.close)
 
-            self.assertFalse(wall_openings_path(workspace, data_root).exists())
+            self.assertEqual(load_wall_openings(workspace, data_root), [])
             self.assertFalse(wall_opening_events_path(workspace, data_root).exists())
             self.assertTrue(wall_openings_path(workspace, other_root).exists())
             self.assertTrue(wall_opening_events_path(workspace, other_root).exists())
@@ -268,9 +316,10 @@ class MainWindowWallOpeningsTest(unittest.TestCase):
                 pano_yaw_offset_deg=-92.819,
             )
 
-            with patch("ui.main_window.find_default_dataset", return_value=object()), \
+            with patch("ui.main_window.find_default_dataset", return_value=SimpleNamespace(data_root=data_root)), \
                 patch("ui.main_window.load_dataset", return_value=dataset):
-                win = MainWindow(workspace)
+                win = MainWindow(workspace, prompt_for_dataset=False)
+                win._load()
             self.addCleanup(win.close)
 
             self.assertAlmostEqual(float(win.yaw_offset.currentData()), -90.0)
@@ -294,9 +343,10 @@ class MainWindowWallOpeningsTest(unittest.TestCase):
                 pano_yaw_offset_deg=-90.0,
             )
 
-            with patch("ui.main_window.find_default_dataset", return_value=object()), \
+            with patch("ui.main_window.find_default_dataset", return_value=SimpleNamespace(data_root=data_root)), \
                 patch("ui.main_window.load_dataset", return_value=dataset):
-                win = MainWindow(workspace)
+                win = MainWindow(workspace, prompt_for_dataset=False)
+                win._load()
             self.addCleanup(win.close)
 
             self.assertTrue(win.scene.gl_window._selected_depth_test)

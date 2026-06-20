@@ -6,6 +6,8 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
+import numpy as np
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
@@ -156,6 +158,100 @@ class SceneViewInteractionTest(unittest.TestCase):
         self.assertNotIn("load_image", calls)
         self.assertIn("set_pose", calls)
         self.assertIs(window._current_pose, pose)
+
+    def test_pending_resources_request_render_after_gl_initializes(self):
+        window = _SceneGLWindow()
+        self.addCleanup(window.close)
+        calls: list[tuple] = []
+
+        class FakePointCloud:
+            points = None
+
+            def upload(self, points, colors):
+                self.points = points
+                calls.append(("upload_points", len(points), len(colors)))
+
+        class FakePano:
+            def load_image(self, path):
+                calls.append(("load_image", Path(path).name))
+
+            def set_pose(self, roll, pitch, yaw):
+                calls.append(("set_pose", roll, pitch, yaw))
+
+        window._pc = FakePointCloud()
+        window._pano = FakePano()
+        points = np.asarray([[1.0, 0.0, 0.8]], dtype=np.float32)
+        colors = np.asarray([[255, 255, 255]], dtype=np.uint8)
+        pose = CameraPose("608.jpg", 0.0, 0.0, 0.0, 0.1, 0.2, 0.3)
+        window._pending_points = (points, colors)
+        window._pending_pose = (pose, Path("608.jpg"), True)
+
+        needs_render = window._apply_pending_resources_after_context_ready()
+
+        self.assertTrue(needs_render)
+        self.assertIn(("upload_points", 1, 1), calls)
+        self.assertIn(("load_image", "608.jpg"), calls)
+        self.assertIn(("set_pose", 0.1, 0.2, 0.3), calls)
+        self.assertIsNone(window._pending_points)
+        self.assertIsNone(window._pending_pose)
+        self.assertIs(window._current_pose, pose)
+
+    def test_keyframe_upload_uses_own_gl_context_after_initialization(self):
+        calls: list[str] = []
+
+        class TrackingWindow(_SceneGLWindow):
+            def context(self):
+                return object()
+
+            def makeCurrent(self):
+                calls.append("makeCurrent")
+
+            def doneCurrent(self):
+                calls.append("doneCurrent")
+
+        window = TrackingWindow()
+        self.addCleanup(window.close)
+        window._ctx = object()
+        window._pano = SimpleNamespace(
+            load_image=lambda _path: calls.append("load_image"),
+            set_pose=lambda *_args: calls.append("set_pose"),
+            tex=object(),
+        )
+        window._bbox_overlay = SimpleNamespace(clear=lambda: calls.append("clear"))
+        pose = CameraPose("608.jpg", 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+        window.set_keyframe(pose, Path("608.jpg"))
+
+        self.assertEqual(calls[:2], ["makeCurrent", "load_image"])
+        self.assertIn("set_pose", calls)
+        self.assertEqual(calls[-1], "doneCurrent")
+
+    def test_world_point_upload_uses_own_gl_context_after_initialization(self):
+        calls: list[str] = []
+
+        class TrackingWindow(_SceneGLWindow):
+            def context(self):
+                return object()
+
+            def makeCurrent(self):
+                calls.append("makeCurrent")
+
+            def doneCurrent(self):
+                calls.append("doneCurrent")
+
+        window = TrackingWindow()
+        self.addCleanup(window.close)
+        window._ctx = object()
+        window._pc = SimpleNamespace(
+            upload=lambda _points, _colors: calls.append("upload"),
+            points=None,
+        )
+        points = np.asarray([[1.0, 0.0, 0.8]], dtype=np.float32)
+        colors = np.asarray([[255, 255, 255]], dtype=np.uint8)
+
+        window.set_world_points(points, colors)
+
+        self.assertEqual(calls, ["makeCurrent", "upload", "doneCurrent"])
 
 
 if __name__ == "__main__":

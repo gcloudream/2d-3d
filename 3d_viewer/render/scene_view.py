@@ -7,6 +7,7 @@ framebuffer，表现为全景逃出左侧视图区域。QOpenGLWindow 是 native
 """
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import moderngl
@@ -27,6 +28,9 @@ from render.point_cloud import PointCloud
 from render.picking import ScreenPointIndex
 
 
+_LOG = logging.getLogger("3d_viewer")
+
+
 class SceneView(QWidget):
     """QWidget facade used by MainWindow.
 
@@ -38,9 +42,9 @@ class SceneView(QWidget):
     point_clicked = Signal(int)
     detection_clicked = Signal(int, float, float)
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, *, view_name: str = "scene"):
         super().__init__(parent)
-        self.gl_window = _SceneGLWindow()
+        self.gl_window = _SceneGLWindow(view_name=view_name)
         self.gl_window.hover_changed.connect(self.hover_changed)
         self.gl_window.point_clicked.connect(self.point_clicked)
         self.gl_window.detection_clicked.connect(self.detection_clicked)
@@ -121,7 +125,7 @@ class _SceneGLWindow(QOpenGLWindow):
     point_clicked = Signal(int)
     detection_clicked = Signal(int, float, float)
 
-    def __init__(self):
+    def __init__(self, *, view_name: str = "scene"):
         fmt = QSurfaceFormat()
         fmt.setVersion(3, 3)
         fmt.setProfile(QSurfaceFormat.CoreProfile)
@@ -159,6 +163,8 @@ class _SceneGLWindow(QOpenGLWindow):
         self._pending_points: tuple[np.ndarray, np.ndarray] | None = None
         self._pending_pose: tuple[CameraPose, Path, bool] | None = None
         self._screen_index = ScreenPointIndex()
+        self._view_name = str(view_name)
+        self._logged_first_paint = False
 
         self._hover_timer = QTimer(self)
         self._hover_timer.setSingleShot(True)
@@ -171,31 +177,50 @@ class _SceneGLWindow(QOpenGLWindow):
         self._screen_index.clear()
         if self._ctx is None:
             self._pending_points = (points, colors)
+            self._log_render_event("world_points_queued", point_count=len(points))
         else:
-            self._pc.upload(points, colors)
-            if self._global_view_mode:
-                self.orbit_camera.fit_to_points(points)
+            def upload():
+                self._pc.upload(points, colors)
+                if self._global_view_mode:
+                    self.orbit_camera.fit_to_points(points)
+            self._run_with_current_context(upload)
+            self._log_render_event("world_points_uploaded", point_count=len(points))
             self.update()
 
     def set_keyframe(self, pose: CameraPose, image_path: Path, load_pano: bool = True):
         if self._ctx is None:
             self._pending_pose = (pose, image_path, bool(load_pano))
+            self._log_render_event(
+                "keyframe_queued",
+                image_name=pose.image_name,
+                image_exists=Path(image_path).exists(),
+                load_pano=bool(load_pano),
+            )
             return
         self._clear_hover()
-        if load_pano:
-            self._pano.load_image(image_path)
-        self._pano.set_pose(pose.roll, pose.pitch, pose.yaw)
-        if not self._global_view_mode:
-            self.camera.set_keyframe(
-                pose.position,
-                pose.roll,
-                pose.pitch,
-                pose.yaw,
-                self._pano_yaw_offset_deg,
-            )
-        self._current_pose = pose
-        self._selected_detection = -1
-        self._refresh_bbox_overlay()
+        def apply_keyframe():
+            if load_pano:
+                self._pano.load_image(image_path)
+            self._pano.set_pose(pose.roll, pose.pitch, pose.yaw)
+            if not self._global_view_mode:
+                self.camera.set_keyframe(
+                    pose.position,
+                    pose.roll,
+                    pose.pitch,
+                    pose.yaw,
+                    self._pano_yaw_offset_deg,
+                )
+            self._current_pose = pose
+            self._selected_detection = -1
+            self._refresh_bbox_overlay()
+        self._run_with_current_context(apply_keyframe)
+        self._log_render_event(
+            "keyframe_applied",
+            image_name=pose.image_name,
+            image_exists=Path(image_path).exists(),
+            load_pano=bool(load_pano),
+            pano_loaded=self._pano_texture_loaded(),
+        )
         self.update()
 
     def set_show_pano(self, on: bool):
@@ -214,15 +239,17 @@ class _SceneGLWindow(QOpenGLWindow):
     def set_pano_yaw_offset(self, degrees: float):
         self._pano_yaw_offset_deg = float(degrees)
         if self._pano is not None:
-            self._pano.set_yaw_offset(self._pano_yaw_offset_deg)
-            if self._current_pose is not None and not self._global_view_mode:
-                self.camera.update_keyframe_yaw_reference(
-                    self._current_pose.roll,
-                    self._current_pose.pitch,
-                    self._current_pose.yaw,
-                    self._pano_yaw_offset_deg,
-                )
-            self._refresh_bbox_overlay()
+            def apply_yaw_offset():
+                self._pano.set_yaw_offset(self._pano_yaw_offset_deg)
+                if self._current_pose is not None and not self._global_view_mode:
+                    self.camera.update_keyframe_yaw_reference(
+                        self._current_pose.roll,
+                        self._current_pose.pitch,
+                        self._current_pose.yaw,
+                        self._pano_yaw_offset_deg,
+                    )
+                self._refresh_bbox_overlay()
+            self._run_with_current_context(apply_yaw_offset)
             self.update()
 
     def reset_view(self):
@@ -248,7 +275,7 @@ class _SceneGLWindow(QOpenGLWindow):
 
     def set_highlight_mask(self, mask: np.ndarray | None):
         if self._pc is not None:
-            self._pc.set_highlight_mask(mask)
+            self._run_with_current_context(lambda: self._pc.set_highlight_mask(mask))
             self.update()
 
     def set_selected_depth_test(self, on: bool):
@@ -285,7 +312,7 @@ class _SceneGLWindow(QOpenGLWindow):
         self._detection_image_size = (int(img_w), int(img_h))
         self._selected_detection = -1
         self._last_point_detection_hit = (-1, float("nan"), float("nan"))
-        self._refresh_bbox_overlay()
+        self._run_with_current_context(self._refresh_bbox_overlay)
         self.update()
 
     def consume_point_detection_hit(self) -> tuple[int, float, float]:
@@ -295,7 +322,7 @@ class _SceneGLWindow(QOpenGLWindow):
 
     def set_selected_detection(self, idx: int):
         self._selected_detection = int(idx)
-        self._refresh_bbox_overlay()
+        self._run_with_current_context(self._refresh_bbox_overlay)
         self.update()
 
     def _refresh_bbox_overlay(self):
@@ -323,6 +350,15 @@ class _SceneGLWindow(QOpenGLWindow):
             selected_index=self._selected_detection,
         )
 
+    def _run_with_current_context(self, callback):
+        if self._ctx is None or self.context() is None:
+            return callback()
+        self.makeCurrent()
+        try:
+            return callback()
+        finally:
+            self.doneCurrent()
+
     # ------------- OpenGL lifecycle -------------
 
     def initializeGL(self):
@@ -335,12 +371,25 @@ class _SceneGLWindow(QOpenGLWindow):
         self._pc.set_selected_depth_test(self._selected_depth_test)
         self._pc.set_selected_style(self._selected_ring_color, self._selected_fill_color)
         self._bbox_overlay = BboxOverlay(self._ctx)
+        self._log_render_event(
+            "context_initialized",
+            logical_size=self._logical_size(),
+            framebuffer_size=self._framebuffer_size(),
+        )
 
+        if self._apply_pending_resources_after_context_ready():
+            self._log_render_event("pending_resources_applied")
+            self.update()
+
+    def _apply_pending_resources_after_context_ready(self) -> bool:
+        needs_render = False
         if self._pending_points is not None:
             self._pc.upload(*self._pending_points)
             if self._global_view_mode:
                 self.orbit_camera.fit_to_points(self._pending_points[0])
             self._pending_points = None
+            needs_render = True
+            self._log_render_event("pending_points_uploaded")
         if self._pending_pose is not None:
             pose, img, load_pano = self._pending_pose
             if load_pano:
@@ -356,7 +405,16 @@ class _SceneGLWindow(QOpenGLWindow):
                 )
             self._current_pose = pose
             self._pending_pose = None
+            needs_render = True
+            self._log_render_event(
+                "pending_keyframe_applied",
+                image_name=pose.image_name,
+                image_exists=Path(img).exists(),
+                load_pano=bool(load_pano),
+                pano_loaded=self._pano_texture_loaded(),
+            )
         self._refresh_bbox_overlay()
+        return needs_render
 
     def resizeGL(self, w: int, h: int):
         if self._ctx is None:
@@ -370,6 +428,18 @@ class _SceneGLWindow(QOpenGLWindow):
         fb_w, fb_h = self._framebuffer_size()
         self._ctx.viewport = (0, 0, fb_w, fb_h)
         self._ctx.clear(0.07, 0.07, 0.09, 1.0)
+        if not self._logged_first_paint:
+            self._logged_first_paint = True
+            self._log_render_event(
+                "first_paint",
+                logical_size=(logical_w, logical_h),
+                framebuffer_size=(fb_w, fb_h),
+                show_pano=bool(self._show_pano),
+                show_pc=bool(self._show_pc),
+                pano_loaded=self._pano_texture_loaded(),
+                point_count=int(self._pc.n) if self._pc is not None else 0,
+                global_view=bool(self._global_view_mode),
+            )
 
         active_camera = self.orbit_camera if self._global_view_mode else self.camera
         proj = active_camera.proj_matrix(logical_w / logical_h)
@@ -382,6 +452,17 @@ class _SceneGLWindow(QOpenGLWindow):
             self._pc.render(mvp)
         if self._show_bboxes and self._bbox_overlay is not None:
             self._bbox_overlay.render(mvp, active_camera.position)
+
+    def _log_render_event(self, event: str, **fields):
+        if not _LOG.handlers:
+            return
+        parts = [f"view={self._view_name}"]
+        for key, value in fields.items():
+            parts.append(f"{key}={value}")
+        _LOG.info("render_%s %s", event, " ".join(parts))
+
+    def _pano_texture_loaded(self) -> bool:
+        return bool(self._pano is not None and getattr(self._pano, "tex", None) is not None)
 
     def _logical_size(self) -> tuple[int, int]:
         return max(1, self.width()), max(1, self.height())

@@ -440,6 +440,59 @@ class WallModelTest(unittest.TestCase):
         self.assertEqual(matched[0].axis_min, 0.8)
         self.assertEqual(matched[0].axis_max, 1.6)
 
+    def test_builds_opening_overlays_for_wall_segments(self):
+        from core.wall_openings import WallOpening
+        from core.wall_model import opening_overlays_for_wall_segments
+
+        wall = WallSegment("vertical", 1.0, 0.0, 1.0, 3.0, 0.0, 2.6, 3.0, 100, 2.6)
+        matched_opening = WallOpening(
+            id="window-0001",
+            label="window",
+            source_image="608.jpg",
+            seed_index=1,
+            point_count=20,
+            confidence="high",
+            reason="accepted_vertical_planar_region",
+            center=(1.05, 1.2, 1.2),
+            normal=(1.0, 0.0, 0.0),
+            bbox_min=(1.02, 0.8, 0.9),
+            bbox_max=(1.08, 1.6, 1.5),
+            width_m=0.8,
+            height_m=0.6,
+            z_min=0.9,
+            z_max=1.5,
+            detection_index=-1,
+            score=None,
+        )
+        projected_opening = WallOpening(
+            id="window-0002",
+            label="window",
+            source_image="608.jpg",
+            seed_index=2,
+            point_count=20,
+            confidence="high",
+            reason="fused_frustum_and_planar_geometry",
+            center=(3.0, 3.0, 1.0),
+            normal=(1.0, 0.0, 0.0),
+            bbox_min=(2.8, 2.8, 0.5),
+            bbox_max=(3.2, 3.2, 1.5),
+            width_m=0.4,
+            height_m=1.0,
+            z_min=0.5,
+            z_max=1.5,
+            detection_index=-1,
+            score=None,
+        )
+
+        markers, projected, unmatched = opening_overlays_for_wall_segments(
+            [matched_opening, projected_opening],
+            [wall],
+        )
+
+        self.assertEqual([marker.opening_id for marker in markers], ["window-0001"])
+        self.assertEqual([opening.id for opening in projected], ["window-0002"])
+        self.assertEqual([item["id"] for item in unmatched], ["window-0002"])
+
     def test_rejects_opening_far_from_wall_segment(self):
         from core.wall_openings import WallOpening
         from core.wall_model import match_wall_openings_to_segments

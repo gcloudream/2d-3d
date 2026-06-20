@@ -341,11 +341,10 @@ def export_wall_model_from_wall_lines(
             source="provided_wall_lines",
         )
     opening_records = list(openings or [])
-    opening_markers, unmatched_openings = match_wall_openings_to_segments(
+    opening_markers, projected_openings, unmatched_openings = opening_overlays_for_wall_segments(
         opening_records,
         segments,
     )
-    projected_openings = _projected_openings_from_unmatched(opening_records, unmatched_openings)
     if opening_records:
         append_wall_opening_event(
             workspace,
@@ -1164,6 +1163,19 @@ def match_wall_openings_to_segments(
             )
         )
     return matched, unmatched
+
+
+def opening_overlays_for_wall_segments(
+    openings: Iterable[WallOpening],
+    segments: list[WallSegment],
+) -> tuple[list[WallOpeningMarker], list[WallOpening], list[dict]]:
+    opening_records = list(openings or [])
+    opening_markers, unmatched_openings = match_wall_openings_to_segments(
+        opening_records,
+        segments,
+    )
+    projected_openings = _projected_openings_from_unmatched(opening_records, unmatched_openings)
+    return opening_markers, projected_openings, unmatched_openings
 
 
 def opening_markers_to_mesh(
